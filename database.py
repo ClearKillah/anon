@@ -13,8 +13,9 @@ class Database:
         """Connect to the database."""
         try:
             self.pool = await asyncpg.create_pool(dsn)
-            await self.drop_tables()  # Drop existing tables
+            # await self.drop_tables()  # Drop existing tables
             await self.create_tables()  # Create tables with new schema
+            await self.migrate_tables()  # Выполняем миграцию, если необходимо
             logger.info("Successfully connected to the database")
         except Exception as e:
             logger.error(f"Error connecting to the database: {e}")
@@ -72,6 +73,8 @@ class Database:
                         chat_id INTEGER,
                         sender_id BIGINT REFERENCES users(user_id),
                         content TEXT,
+                        message_type VARCHAR(20) DEFAULT 'text', -- тип: text, photo, video, voice, sticker, video_note
+                        file_id TEXT, -- для хранения ID файла в Telegram
                         sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (chat_id) REFERENCES active_chats(chat_id) ON DELETE SET NULL
                     )
@@ -181,13 +184,13 @@ class Database:
             await conn.execute('DELETE FROM messages WHERE chat_id = $1', chat_id)
 
     # Message operations
-    async def add_message(self, chat_id: int, sender_id: int, content: str):
+    async def add_message(self, chat_id: int, sender_id: int, content: str = None, message_type: str = 'text', file_id: str = None):
         """Add a new message to the database."""
         async with self.pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO messages (chat_id, sender_id, content)
-                VALUES ($1, $2, $3)
-            ''', chat_id, sender_id, content)
+                INSERT INTO messages (chat_id, sender_id, content, message_type, file_id)
+                VALUES ($1, $2, $3, $4, $5)
+            ''', chat_id, sender_id, content, message_type, file_id)
 
     # User state operations
     async def set_user_searching(self, user_id: int, is_searching: bool):
@@ -250,6 +253,36 @@ class Database:
                 FROM user_state
                 WHERE user_id = $1
             ''', user_id)
+
+    async def migrate_tables(self):
+        """Migrate database tables to new structure."""
+        async with self.pool.acquire() as conn:
+            # Проверка существования колонок в таблице messages
+            column_exists = await conn.fetchval('''
+                SELECT EXISTS (
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'messages' AND column_name = 'message_type'
+                )
+            ''')
+            
+            # Если колонки message_type нет, добавляем новые колонки
+            if not column_exists:
+                logger.info("Migrating messages table to support media messages")
+                async with conn.transaction():
+                    # Добавляем колонку message_type
+                    await conn.execute('''
+                        ALTER TABLE messages 
+                        ADD COLUMN message_type VARCHAR(20) DEFAULT 'text'
+                    ''')
+                    
+                    # Добавляем колонку file_id
+                    await conn.execute('''
+                        ALTER TABLE messages 
+                        ADD COLUMN file_id TEXT
+                    ''')
+                    
+                    logger.info("Migration completed successfully")
 
 # Create global database instance
 db = Database() 

@@ -552,10 +552,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user_id = update.effective_user.id
-    message_text = update.message.text
-    message_id = update.message.message_id
+    message = update.message
+    message_id = message.message_id
 
-    if not message_text:
+    # Определяем тип сообщения
+    message_type = None
+    content = None
+    file_id = None
+    
+    if message.text:
+        message_type = "text"
+        content = message.text
+    elif message.photo:
+        message_type = "photo"
+        file_id = message.photo[-1].file_id  # Берем самое большое разрешение
+        content = message.caption  # Сохраняем подпись к фото, если есть
+    elif message.video:
+        message_type = "video"
+        file_id = message.video.file_id
+        content = message.caption  # Сохраняем подпись к видео, если есть
+    elif message.voice:
+        message_type = "voice"
+        file_id = message.voice.file_id
+    elif message.sticker:
+        message_type = "sticker"
+        file_id = message.sticker.file_id
+    elif message.video_note:
+        message_type = "video_note"
+        file_id = message.video_note.file_id
+    else:
+        # Если тип сообщения не поддерживается, отправляем уведомление
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Этот тип сообщений не поддерживается."
+        )
         return
 
     # Check if user is in active chat
@@ -563,39 +593,94 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not active_chat:
         keyboard = [[InlineKeyboardButton("Начать поиск", callback_data="search_chat")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
+        
+        await update_main_message(
+            user_id,
+            context,
             "Вы не находитесь в активном чате. Нажмите кнопку ниже, чтобы начать поиск собеседника.",
-            reply_markup=reply_markup
+            reply_markup
         )
+        
+        # Удаляем сообщение пользователя
+        try:
+            await context.bot.delete_message(chat_id=user_id, message_id=message_id)
+        except Exception as e:
+            logger.error(f"Error deleting user message: {e}")
+            
         return
 
     chat_id, partner_id = active_chat
 
     try:
-        # Store message in database
-        await db.add_message(chat_id, user_id, message_text)
+        # Store message in database (все типы сообщений)
+        await db.add_message(chat_id, user_id, content, message_type, file_id)
         
         # Store original message ID for cleanup
         if user_id not in USER_MESSAGES:
             USER_MESSAGES[user_id] = []
         USER_MESSAGES[user_id].append(message_id)
         
-        # Forward message to partner
-        sent_message = await context.bot.send_message(
-            chat_id=partner_id,
-            text=message_text
-        )
+        # Forward message to partner based on type
+        sent_message = None
+        
+        if message_type == "text":
+            sent_message = await context.bot.send_message(
+                chat_id=partner_id,
+                text=content
+            )
+        elif message_type == "photo":
+            sent_message = await context.bot.send_photo(
+                chat_id=partner_id,
+                photo=file_id,
+                caption=message.caption
+            )
+        elif message_type == "video":
+            sent_message = await context.bot.send_video(
+                chat_id=partner_id,
+                video=file_id,
+                caption=message.caption
+            )
+        elif message_type == "voice":
+            sent_message = await context.bot.send_voice(
+                chat_id=partner_id,
+                voice=file_id
+            )
+        elif message_type == "sticker":
+            sent_message = await context.bot.send_sticker(
+                chat_id=partner_id,
+                sticker=file_id
+            )
+        elif message_type == "video_note":
+            sent_message = await context.bot.send_video_note(
+                chat_id=partner_id,
+                video_note=file_id
+            )
         
         # Store forwarded message ID for cleanup
         if partner_id not in USER_MESSAGES:
             USER_MESSAGES[partner_id] = []
-        USER_MESSAGES[partner_id].append(sent_message.message_id)
         
-        logger.info(f"Message forwarded from {user_id} to {partner_id}")
+        if sent_message:
+            USER_MESSAGES[partner_id].append(sent_message.message_id)
+            logger.info(f"Message of type {message_type} forwarded from {user_id} to {partner_id}")
+        
     except Exception as e:
         logger.error(f"Error handling message from {user_id}: {e}")
-        await update.message.reply_text(
-            "Произошла ошибка при отправке сообщения. Попробуйте еще раз или используйте /stop для завершения чата."
+        
+        # Используем update_main_message для показа ошибки вместо отправки нового сообщения
+        keyboard = [
+            [
+                InlineKeyboardButton("Пропустить", callback_data="skip_chat"),
+                InlineKeyboardButton("Завершить", callback_data="stop_chat"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            "Произошла ошибка при отправке сообщения. Попробуйте еще раз или используйте кнопки ниже для управления чатом.",
+            reply_markup
         )
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -909,6 +994,12 @@ def main() -> None:
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.Regex(r'(закреплено|pinned|message|сообщение)'),
         handle_service_message
+    ))
+    
+    # Обработчики медиа-сообщений
+    application.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO | filters.VOICE | filters.STICKER | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE,
+        handle_message
     ))
     
     # General message handler should be last
