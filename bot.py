@@ -351,6 +351,16 @@ async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await delete_messages(user_id, context)
         await delete_messages(partner_id, context)
         
+        # Delete pin messages
+        try:
+            # Try to delete pin notifications multiple times
+            for _ in range(3):
+                await delete_pin_message(user_id, context)
+                await delete_pin_message(partner_id, context)
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Error deleting pin messages: {e}")
+        
         # End chat in database
         await db.end_chat(chat_id)
 
@@ -401,6 +411,16 @@ async def skip_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Clear chat history from Telegram (but keep in DB)
         await delete_messages(user_id, context)
         await delete_messages(partner_id, context)
+        
+        # Delete pin messages
+        try:
+            # Try to delete pin notifications multiple times
+            for _ in range(3):
+                await delete_pin_message(user_id, context)
+                await delete_pin_message(partner_id, context)
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Error deleting pin messages: {e}")
         
         # End chat in database
         await db.end_chat(chat_id)
