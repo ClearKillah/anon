@@ -305,24 +305,48 @@ async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer("Поиск отменён")
 
 async def delete_pin_message(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Delete the pin message and unpin chat message."""
+    """Delete the pin message using stored message ID."""
     try:
-        # Get chat info
-        chat = await context.bot.get_chat(user_id)
+        # Попытка удалить по сохраненному ID
+        pin_message_id = await db.get_pin_message_id(user_id)
+        if pin_message_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=user_id,
+                    message_id=pin_message_id
+                )
+                logger.info(f"Deleted pin notification message {pin_message_id} for user {user_id}")
+                await db.update_pin_message_id(user_id, None)
+            except Exception as e:
+                logger.error(f"Error deleting pin notification by ID: {e}")
         
-        # Get all messages in chat
-        messages = await context.bot.get_chat_history(chat_id=user_id, limit=5)
-        
-        # Find and delete pin notification message
-        for message in messages:
-            if message.text == "Закреплено сообщение" or message.text == "Pinned message":
-                try:
-                    await context.bot.delete_message(chat_id=user_id, message_id=message.message_id)
-                    logger.info(f"Deleted pin notification message {message.message_id} for user {user_id}")
-                    break
-                except Exception as e:
-                    logger.error(f"Error deleting pin notification: {e}")
-                    
+        # Проактивный поиск сообщений о закреплении
+        try:
+            # Получить информацию о чате
+            chat = await context.bot.get_chat(user_id)
+            
+            # Если в чате есть закрепленное сообщение
+            if chat.pinned_message:
+                pinned_message_id = chat.pinned_message.message_id
+                
+                # Получаем возможные ID сообщений уведомлений (обычно появляются сразу после закрепленного)
+                possible_notification_ids = [
+                    pinned_message_id + 1,
+                    pinned_message_id + 2,
+                    pinned_message_id + 3
+                ]
+                
+                # Пытаемся удалить каждое возможное уведомление
+                for msg_id in possible_notification_ids:
+                    try:
+                        await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
+                        logger.info(f"Proactively deleted potential pin notification: {msg_id}")
+                    except Exception:
+                        # Игнорируем ошибки, так как мы просто пытаемся угадать ID
+                        pass
+        except Exception as e:
+            logger.error(f"Error in proactive pin notification cleanup: {e}")
+            
     except Exception as e:
         logger.error(f"Error handling pin message deletion for user {user_id}: {e}")
 
@@ -618,33 +642,93 @@ async def pin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Check if user is in chat
     active_chat = await db.get_active_chat(user_id)
     if not active_chat:
-        await update.message.reply_text("Вы не находитесь в активном чате.")
+        # Используем update_main_message вместо reply_text
+        keyboard = [[InlineKeyboardButton("Начать поиск", callback_data="search_chat")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            "Вы не находитесь в активном чате. Нажмите кнопку ниже, чтобы начать поиск.",
+            reply_markup
+        )
+        
+        # Удаляем команду
+        try:
+            await context.bot.delete_message(chat_id=user_id, message_id=update.message.message_id)
+        except Exception as e:
+            logger.error(f"Error deleting pin command: {e}")
+            
         return
 
     chat_id, partner_id = active_chat
     
     try:
-        # Pin the message
+        # Store the original command message to delete it later
+        command_message = update.message
+        command_message_id = command_message.message_id
+        
+        # Pin the message with notifications disabled
         message_to_pin = update.message.reply_to_message
-        await message_to_pin.pin()
+        await message_to_pin.pin(disable_notification=True)
         
-        # Store pin message ID
-        pin_message = await context.bot.send_message(
-            chat_id=user_id,
-            text="Сообщение закреплено!"
-        )
-        await db.update_pin_message_id(user_id, pin_message.message_id)
+        # Wait for pin notification to appear and delete it
+        await asyncio.sleep(1)
         
-        # Send notification to partner
-        partner_pin_message = await context.bot.send_message(
-            chat_id=partner_id,
-            text="Собеседник закрепил сообщение!"
+        # Try to delete pin notification several times
+        for attempt in range(5):
+            try:
+                # Delete the original command
+                await context.bot.delete_message(chat_id=user_id, message_id=command_message_id)
+            except Exception as e:
+                logger.error(f"Error deleting command message: {e}")
+            
+            # Try to delete pin notification
+            await delete_pin_message(user_id, context)
+            
+            await asyncio.sleep(0.5)
+        
+        # Get current keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("Пропустить", callback_data="skip_chat"),
+                InlineKeyboardButton("Завершить", callback_data="stop_chat"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Update partner's main message with notification
+        await update_main_message(
+            partner_id,
+            context,
+            "Собеседник закрепил сообщение!\nВы в чате с собеседником.",
+            reply_markup
         )
-        await db.update_pin_message_id(partner_id, partner_pin_message.message_id)
         
     except Exception as e:
         logger.error(f"Error pinning message: {e}")
-        await update.message.reply_text("Не удалось закрепить сообщение.")
+        
+        # Используем update_main_message вместо reply_text
+        keyboard = [
+            [
+                InlineKeyboardButton("Пропустить", callback_data="skip_chat"),
+                InlineKeyboardButton("Завершить", callback_data="stop_chat"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            "Не удалось закрепить сообщение. Вы в чате с собеседником.",
+            reply_markup
+        )
+        
+        # Удаляем команду
+        try:
+            await context.bot.delete_message(chat_id=user_id, message_id=update.message.message_id)
+        except Exception as e:
+            logger.error(f"Error deleting pin command after error: {e}")
 
 async def unpin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Unpin the current pinned message."""
@@ -723,6 +807,62 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Error clearing history: {e}")
         await update.message.reply_text("Не удалось очистить историю чата.")
 
+async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle service messages like pin notifications."""
+    if not update.message:
+        return
+    
+    # Убедимся, что это сообщение от Telegram, а не от пользователя
+    is_system_message = update.message.from_user and update.message.from_user.id == 777000
+    is_pinned_update = update.message.pinned_message is not None
+    
+    # Check if this is a pin notification (multiple variants)
+    pin_messages = [
+        "Закреплено сообщение",
+        "Pinned message",
+        "Сообщение закреплено",
+        "Message pinned",
+        "pinned",
+        "закреплено"
+    ]
+    
+    # Проверка на системное сообщение о закреплении
+    is_pin_message = update.message.text and any(text.lower() in update.message.text.lower() for text in pin_messages)
+    
+    # Если это обновление о закреплении или похоже на уведомление о закреплении
+    if is_pinned_update or is_system_message or is_pin_message:
+        try:
+            logger.info(f"Found pin notification: {update.message.text or 'No text'}, message_id: {update.message.message_id}")
+            
+            # Delete the pin notification immediately
+            await update.message.delete()
+            logger.info(f"Successfully deleted pin notification message {update.message.message_id}")
+            
+            # Store this message ID in case we need to delete it later
+            if update.effective_chat:
+                user_id = update.effective_chat.id
+                await db.update_pin_message_id(user_id, update.message.message_id)
+        except Exception as e:
+            logger.error(f"Error deleting pin notification: {e}")
+    
+    # Если это не уведомление о закреплении, но похоже на сервисное сообщение, проверим еще раз
+    elif update.message.text and len(update.message.text) < 100 and not update.message.reply_to_message:
+        # Проверим, не похоже ли это на автоматическое сообщение
+        if any(phrase in update.message.text.lower() for phrase in ["bot", "telegram", "message", "сообщение"]):
+            try:
+                # Проверим, не слишком ли активно сообщения пользователя
+                if update.message.from_user and update.message.from_user.id != 777000:
+                    active_chat = await db.get_active_chat(update.message.from_user.id)
+                    if active_chat:
+                        # Если это обычный чат, не будем удалять сообщение
+                        return
+                
+                logger.info(f"Found potential service message: {update.message.text}")
+                await update.message.delete()
+                logger.info(f"Deleted potential service message {update.message.message_id}")
+            except Exception as e:
+                logger.error(f"Error handling potential service message: {e}")
+
 async def init_db(application: Application) -> None:
     """Initialize database connection."""
     try:
@@ -757,6 +897,21 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cancel_search, pattern="^cancel_search$"))
     application.add_handler(CallbackQueryHandler(stop_chat, pattern="^stop_chat$"))
     application.add_handler(CallbackQueryHandler(skip_chat, pattern="^skip_chat$"))
+    
+    # Add handler for service messages (should be before general message handler)
+    # Обрабатываем как обновления с закрепленными сообщениями, так и просто сервисные сообщения
+    application.add_handler(MessageHandler(
+        filters.StatusUpdate.PINNED_MESSAGE & filters.ChatType.PRIVATE,
+        handle_service_message
+    ))
+    
+    # Добавляем еще один обработчик для поиска по тексту сообщений о закреплении
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.Regex(r'(закреплено|pinned|message|сообщение)'),
+        handle_service_message
+    ))
+    
+    # General message handler should be last
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Run database initialization in the event loop
