@@ -996,9 +996,9 @@ def main() -> None:
         handle_service_message
     ))
     
-    # Обработчики медиа-сообщений
+    # Обработчики медиа-сообщений - используем правильные названия фильтров
     application.add_handler(MessageHandler(
-        (filters.PHOTO | filters.VIDEO | filters.VOICE | filters.STICKER | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE,
+        (filters.PHOTO | filters.VIDEO | filters.VOICE | filters.Sticker.ALL | filters.VIDEO_NOTE) & filters.ChatType.PRIVATE,
         handle_message
     ))
     
