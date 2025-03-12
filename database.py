@@ -51,6 +51,9 @@ class Database:
         - active_chats: Store information about currently active chats
         - messages: Store chat messages including media content
         - user_state: Store user state information
+        - user_profile: Store user profile information
+        - user_interests: Store user interests
+        - interests: Store available interests
         """
         if not self.pool:
             logger.error("Cannot create tables: database connection not established")
@@ -117,9 +120,50 @@ class Database:
                         is_searching BOOLEAN DEFAULT FALSE,
                         main_message_id BIGINT,
                         pin_message_id BIGINT,
-                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        profile_setup_state TEXT DEFAULT NULL,
+                        setup_step INT DEFAULT 0
                     )
                 ''')
+                
+                # Create user_profile table
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS user_profile (
+                        user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+                        gender TEXT,
+                        looking_for TEXT,
+                        age INT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Create interests table
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS interests (
+                        id SERIAL PRIMARY KEY,
+                        name TEXT UNIQUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                # Create user_interests table (many-to-many relationship)
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS user_interests (
+                        user_id BIGINT REFERENCES users(user_id),
+                        interest_id INT REFERENCES interests(id),
+                        PRIMARY KEY (user_id, interest_id)
+                    )
+                ''')
+                
+                # Insert default interests if they don't exist
+                default_interests = ["Флирт", "Книги", "Общение"]
+                for interest in default_interests:
+                    await conn.execute('''
+                        INSERT INTO interests (name) 
+                        VALUES ($1) 
+                        ON CONFLICT (name) DO NOTHING
+                    ''', interest)
                 
                 logger.info("Database tables created or already exist")
 
@@ -766,6 +810,69 @@ class Database:
                     
                     logger.info("Local file path migration completed successfully")
 
+            # Check for user_profile table
+            profile_table_exists = await conn.fetchval('''
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'user_profile'
+                )
+            ''')
+            
+            if not profile_table_exists:
+                logger.info("Migrating database to add profile tables")
+                async with conn.transaction():
+                    # Create user_profile table
+                    await conn.execute('''
+                        CREATE TABLE IF NOT EXISTS user_profile (
+                            user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+                            gender TEXT,
+                            looking_for TEXT,
+                            age INT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Create interests table
+                    await conn.execute('''
+                        CREATE TABLE IF NOT EXISTS interests (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT UNIQUE,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Create user_interests table
+                    await conn.execute('''
+                        CREATE TABLE IF NOT EXISTS user_interests (
+                            user_id BIGINT REFERENCES users(user_id),
+                            interest_id INT REFERENCES interests(id),
+                            PRIMARY KEY (user_id, interest_id)
+                        )
+                    ''')
+                    
+                    # Add profile setup fields to user_state
+                    await conn.execute('''
+                        ALTER TABLE user_state 
+                        ADD COLUMN IF NOT EXISTS profile_setup_state TEXT DEFAULT NULL
+                    ''')
+                    
+                    await conn.execute('''
+                        ALTER TABLE user_state 
+                        ADD COLUMN IF NOT EXISTS setup_step INT DEFAULT 0
+                    ''')
+                    
+                    # Insert default interests
+                    default_interests = ["Флирт", "Книги", "Общение"]
+                    for interest in default_interests:
+                        await conn.execute('''
+                            INSERT INTO interests (name) 
+                            VALUES ($1) 
+                            ON CONFLICT (name) DO NOTHING
+                        ''', interest)
+                    
+                    logger.info("Profile tables migration completed successfully")
+
     async def get_message_media(self, message_id: int):
         """Get media information for a message."""
         async with self.pool.acquire() as conn:
@@ -786,6 +893,364 @@ class Database:
                 ORDER BY sent_at DESC
             ''', chat_id)
             return rows
+
+    # Profile related methods
+    async def get_profile_setup_state(self, user_id: int) -> Tuple[Optional[str], int]:
+        """
+        Get user's profile setup state and step.
+        
+        Args:
+            user_id: The user ID
+            
+        Returns:
+            Tuple with state name and step number
+        """
+        if not self.pool:
+            logger.error(f"Cannot get profile setup state: database connection not established")
+            return None, 0
+            
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow('''
+                    SELECT profile_setup_state, setup_step
+                    FROM user_state
+                    WHERE user_id = $1
+                ''', user_id)
+                
+                if row:
+                    return row['profile_setup_state'], row['setup_step']
+                return None, 0
+        except Exception as e:
+            logger.error(f"Error getting profile setup state for user {user_id}: {e}")
+            return None, 0
+    
+    async def update_profile_setup_state(self, user_id: int, state: Optional[str], step: int) -> bool:
+        """
+        Update user's profile setup state and step.
+        
+        Args:
+            user_id: The user ID
+            state: Current setup state (or None if complete)
+            step: Current step number
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.pool:
+            logger.error(f"Cannot update profile setup state: database connection not established")
+            return False
+            
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute('''
+                    INSERT INTO user_state (user_id, profile_setup_state, setup_step)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (user_id) 
+                    DO UPDATE SET 
+                        profile_setup_state = EXCLUDED.profile_setup_state,
+                        setup_step = EXCLUDED.setup_step,
+                        last_updated = CURRENT_TIMESTAMP
+                ''', user_id, state, step)
+                
+                logger.info(f"Updated profile setup state for user {user_id} to {state}, step {step}")
+                return True
+        except Exception as e:
+            logger.error(f"Error updating profile setup state for user {user_id}: {e}")
+            return False
+    
+    async def save_user_profile(
+        self, 
+        user_id: int, 
+        gender: Optional[str] = None, 
+        looking_for: Optional[str] = None, 
+        age: Optional[int] = None
+    ) -> bool:
+        """
+        Save or update user profile information.
+        
+        Args:
+            user_id: The user ID
+            gender: User's gender
+            looking_for: Gender preference
+            age: User's age
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.pool:
+            logger.error(f"Cannot save user profile: database connection not established")
+            return False
+            
+        try:
+            async with self.pool.acquire() as conn:
+                # First check if there's an existing profile
+                existing = await conn.fetchval('''
+                    SELECT COUNT(*) FROM user_profile WHERE user_id = $1
+                ''', user_id)
+                
+                if existing:
+                    # Update only the provided fields
+                    update_parts = []
+                    params = [user_id]
+                    param_index = 2
+                    
+                    if gender is not None:
+                        update_parts.append(f"gender = ${param_index}")
+                        params.append(gender)
+                        param_index += 1
+                        
+                    if looking_for is not None:
+                        update_parts.append(f"looking_for = ${param_index}")
+                        params.append(looking_for)
+                        param_index += 1
+                        
+                    if age is not None:
+                        update_parts.append(f"age = ${param_index}")
+                        params.append(age)
+                        param_index += 1
+                    
+                    if update_parts:
+                        update_parts.append("updated_at = CURRENT_TIMESTAMP")
+                        query = f'''
+                            UPDATE user_profile 
+                            SET {", ".join(update_parts)}
+                            WHERE user_id = $1
+                        '''
+                        await conn.execute(query, *params)
+                else:
+                    # Insert new profile
+                    await conn.execute('''
+                        INSERT INTO user_profile (user_id, gender, looking_for, age)
+                        VALUES ($1, $2, $3, $4)
+                    ''', user_id, gender, looking_for, age)
+                
+                logger.info(f"Saved profile for user {user_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Error saving profile for user {user_id}: {e}")
+            return False
+    
+    async def get_user_profile(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get user's profile information.
+        
+        Args:
+            user_id: The user ID
+            
+        Returns:
+            Dictionary with profile data or None if not found
+        """
+        if not self.pool:
+            logger.error(f"Cannot get user profile: database connection not established")
+            return None
+            
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow('''
+                    SELECT gender, looking_for, age
+                    FROM user_profile
+                    WHERE user_id = $1
+                ''', user_id)
+                
+                if row:
+                    return dict(row)
+                return None
+        except Exception as e:
+            logger.error(f"Error getting profile for user {user_id}: {e}")
+            return None
+    
+    async def save_user_interest(self, user_id: int, interest_name: str) -> bool:
+        """
+        Add an interest to user's profile.
+        
+        Args:
+            user_id: The user ID
+            interest_name: Name of the interest
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.pool:
+            logger.error(f"Cannot save user interest: database connection not established")
+            return False
+            
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    # Get or create interest
+                    interest_id = await conn.fetchval('''
+                        SELECT id FROM interests WHERE name = $1
+                    ''', interest_name)
+                    
+                    if not interest_id:
+                        interest_id = await conn.fetchval('''
+                            INSERT INTO interests (name) VALUES ($1) RETURNING id
+                        ''', interest_name)
+                    
+                    # Add to user_interests
+                    await conn.execute('''
+                        INSERT INTO user_interests (user_id, interest_id)
+                        VALUES ($1, $2)
+                        ON CONFLICT (user_id, interest_id) DO NOTHING
+                    ''', user_id, interest_id)
+                    
+                    logger.info(f"Added interest '{interest_name}' for user {user_id}")
+                    return True
+        except Exception as e:
+            logger.error(f"Error saving interest for user {user_id}: {e}")
+            return False
+    
+    async def remove_user_interest(self, user_id: int, interest_name: str) -> bool:
+        """
+        Remove an interest from user's profile.
+        
+        Args:
+            user_id: The user ID
+            interest_name: Name of the interest
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.pool:
+            logger.error(f"Cannot remove user interest: database connection not established")
+            return False
+            
+        try:
+            async with self.pool.acquire() as conn:
+                # Get interest ID
+                interest_id = await conn.fetchval('''
+                    SELECT id FROM interests WHERE name = $1
+                ''', interest_name)
+                
+                if interest_id:
+                    # Remove from user_interests
+                    await conn.execute('''
+                        DELETE FROM user_interests
+                        WHERE user_id = $1 AND interest_id = $2
+                    ''', user_id, interest_id)
+                    
+                    logger.info(f"Removed interest '{interest_name}' from user {user_id}")
+                
+                return True
+        except Exception as e:
+            logger.error(f"Error removing interest for user {user_id}: {e}")
+            return False
+    
+    async def get_user_interests(self, user_id: int) -> List[str]:
+        """
+        Get all interests for a user.
+        
+        Args:
+            user_id: The user ID
+            
+        Returns:
+            List of interest names
+        """
+        if not self.pool:
+            logger.error(f"Cannot get user interests: database connection not established")
+            return []
+            
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch('''
+                    SELECT i.name
+                    FROM user_interests ui
+                    JOIN interests i ON ui.interest_id = i.id
+                    WHERE ui.user_id = $1
+                    ORDER BY i.name
+                ''', user_id)
+                
+                return [row['name'] for row in rows]
+        except Exception as e:
+            logger.error(f"Error getting interests for user {user_id}: {e}")
+            return []
+    
+    async def get_all_interests(self) -> List[Dict[str, Any]]:
+        """
+        Get all available interests.
+        
+        Returns:
+            List of dictionaries with interest data
+        """
+        if not self.pool:
+            logger.error("Cannot get all interests: database connection not established")
+            return []
+            
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch('''
+                    SELECT id, name
+                    FROM interests
+                    ORDER BY name
+                ''')
+                
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error getting all interests: {e}")
+            return []
+    
+    async def clear_user_interests(self, user_id: int) -> bool:
+        """
+        Remove all interests for a user.
+        
+        Args:
+            user_id: The user ID
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.pool:
+            logger.error(f"Cannot clear user interests: database connection not established")
+            return False
+            
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute('''
+                    DELETE FROM user_interests
+                    WHERE user_id = $1
+                ''', user_id)
+                
+                logger.info(f"Cleared all interests for user {user_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Error clearing interests for user {user_id}: {e}")
+            return False
+    
+    async def has_completed_profile(self, user_id: int) -> bool:
+        """
+        Check if user has completed their profile.
+        
+        Args:
+            user_id: The user ID
+            
+        Returns:
+            True if profile is complete, False otherwise
+        """
+        if not self.pool:
+            logger.error(f"Cannot check profile completion: database connection not established")
+            return False
+            
+        try:
+            async with self.pool.acquire() as conn:
+                # Check if profile exists with required fields
+                profile_exists = await conn.fetchval('''
+                    SELECT COUNT(*) FROM user_profile
+                    WHERE user_id = $1 AND gender IS NOT NULL
+                ''', user_id)
+                
+                if not profile_exists:
+                    return False
+                
+                # Check if user has at least one interest
+                has_interests = await conn.fetchval('''
+                    SELECT COUNT(*) FROM user_interests
+                    WHERE user_id = $1
+                ''', user_id)
+                
+                return has_interests > 0
+        except Exception as e:
+            logger.error(f"Error checking profile completion for user {user_id}: {e}")
+            return False
 
 # Create global database instance
 db = Database() 

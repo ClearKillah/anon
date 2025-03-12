@@ -50,6 +50,14 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 # If False, local disk storage will be used
 STORE_MEDIA_IN_DB = True
 
+# Constants for profile setup states
+PROFILE_SETUP_NONE = "none"
+PROFILE_SETUP_GENDER = "gender"
+PROFILE_SETUP_LOOKING_FOR = "looking_for"
+PROFILE_SETUP_AGE = "age"
+PROFILE_SETUP_INTERESTS = "interests"
+PROFILE_SETUP_COMPLETE = "complete"
+
 async def download_media_file(
     context: ContextTypes.DEFAULT_TYPE, 
     file_id: str, 
@@ -292,64 +300,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     user = update.effective_user
+    user_id = user.id
     
     # Add user to database
     await db.add_user(
-        user_id=user.id,
+        user_id=user_id,
         username=user.username,
         first_name=user.first_name,
         last_name=user.last_name
     )
-
-    # Store command message for cleanup
-    if user.id not in USER_MESSAGES:
-        USER_MESSAGES[user.id] = []
-    USER_MESSAGES[user.id].append(update.message.message_id)
-
-    # Check if user is already in a chat
-    active_chat = await db.get_active_chat(user.id)
-    if active_chat:
-        chat_id, partner_id = active_chat
+    
+    # Check if user has completed profile setup
+    has_profile = await db.has_completed_profile(user_id)
+    
+    if has_profile:
+        # User already has a profile, show main menu
+        keyboard = [[InlineKeyboardButton("Начать поиск", callback_data="search_chat")],
+                    [InlineKeyboardButton("Мой профиль", callback_data="view_profile")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            "Добро пожаловать в DOX: Анонимный Чат\n\n"
+            "Нажмите кнопку ниже, чтобы начать поиск собеседника.",
+            reply_markup
+        )
+    else:
+        # Offer profile setup
         keyboard = [
-            [
-                InlineKeyboardButton("Пропустить", callback_data="skip_chat"),
-                InlineKeyboardButton("Завершить", callback_data="stop_chat"),
-            ]
+            [InlineKeyboardButton("Начать", callback_data="setup_profile")],
+            [InlineKeyboardButton("Пропустить настройку", callback_data="skip_profile_setup")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        message = await update_main_message(
-            user.id,
+        await update_main_message(
+            user_id,
             context,
-            "Вы уже в чате с собеседником.\nИспользуйте кнопки ниже для управления чатом.",
+            "Добро пожаловать в DOX: Анонимный Чат\n\n"
+            "Заполните быстро анкету, обычно это занимает 9 секунд и на 49% повышает качество поиска собеседников!\n\n"
+            "Вы можете изменить ее в любой момент в настройках.",
             reply_markup
         )
-        return
-
-    # Check if user is already searching
-    is_searching = user.id in await db.get_searching_users()
-    if is_searching:
-        keyboard = [[InlineKeyboardButton("Отменить поиск", callback_data="cancel_search")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        message = await update_main_message(
-            user.id,
-            context,
-            "Идет поиск собеседника...",
-            reply_markup
-        )
-        return
-
-    keyboard = [[InlineKeyboardButton("Начать поиск", callback_data="search_chat")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Send/update main message
-    message = await update_main_message(
-        user.id,
-        context,
-        "Добро пожаловать! Нажмите кнопку ниже, чтобы начать поиск собеседника.",
-        reply_markup
-    )
 
 async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the search_chat button click."""
@@ -385,9 +377,47 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Устанавливаем флаг инициализации чата для пользователя
     CHAT_INITIALIZATION[user_id] = True
     
+    # Get user profile for matching
+    user_profile = await db.get_user_profile(user_id)
+    
     # Get all searching users
     searching_users = await db.get_searching_users()
     potential_partners = [uid for uid in searching_users if uid != user_id]
+    
+    # Filter potential partners based on preferences if profile exists
+    if potential_partners and user_profile:
+        filtered_partners = []
+        for partner_id in potential_partners:
+            # Get partner profile
+            partner_profile = await db.get_user_profile(partner_id)
+            
+            # Skip if partner has no profile
+            if not partner_profile:
+                continue
+                
+            # Check gender preferences
+            user_gender = user_profile.get('gender')
+            user_looking_for = user_profile.get('looking_for')
+            partner_gender = partner_profile.get('gender')
+            partner_looking_for = partner_profile.get('looking_for')
+            
+            # Check if user matches partner's preferences
+            if partner_looking_for != 'any' and user_gender != partner_looking_for:
+                continue
+                
+            # Check if partner matches user's preferences
+            if user_looking_for != 'any' and partner_gender != user_looking_for:
+                continue
+                
+            # Both users match each other's preferences
+            filtered_partners.append(partner_id)
+        
+        # If we have filtered partners, use them instead of all potential partners
+        if filtered_partners:
+            logger.info(f"Found {len(filtered_partners)} partners matching preferences for user {user_id}")
+            potential_partners = filtered_partners
+        else:
+            logger.info(f"No partners matching preferences for user {user_id}, using all potential partners")
 
     if potential_partners:
         # Get random partner from searching users
@@ -440,6 +470,36 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if partner_id in FIRST_MESSAGES:
             del FIRST_MESSAGES[partner_id]
 
+        # Get profiles for both users for introductions
+        user_profile = await db.get_user_profile(user_id) if not user_profile else user_profile
+        partner_profile = await db.get_user_profile(partner_id)
+        
+        # Create introductions if profiles exist
+        user_intro = ""
+        partner_intro = ""
+        
+        if user_profile:
+            user_gender = "Мужчина" if user_profile.get('gender') == "male" else "Женщина"
+            user_age = user_profile.get('age', "Не указан")
+            user_interests = await db.get_user_interests(user_id)
+            interests_text = ", ".join(user_interests) if user_interests else "Не указаны"
+            
+            user_intro = f"Собеседник найден!\n\n"
+            user_intro += f"О вашем собеседнике: {user_gender}, {user_age} лет\n"
+            user_intro += f"Интересы: {interests_text}\n\n"
+            user_intro += "Можете начинать общение."
+        
+        if partner_profile:
+            partner_gender = "Мужчина" if partner_profile.get('gender') == "male" else "Женщина"
+            partner_age = partner_profile.get('age', "Не указан")
+            partner_interests = await db.get_user_interests(partner_id)
+            interests_text = ", ".join(partner_interests) if partner_interests else "Не указаны"
+            
+            partner_intro = f"Собеседник найден!\n\n"
+            partner_intro += f"О вашем собеседнике: {partner_gender}, {partner_age} лет\n"
+            partner_intro += f"Интересы: {interests_text}\n\n"
+            partner_intro += "Можете начинать общение."
+
         # Send messages to both users
         keyboard = [
             [
@@ -457,14 +517,14 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update_main_message(
             user_id,
             context,
-            "Собеседник найден! Можете начинать общение.",
+            partner_intro if partner_intro else "Собеседник найден! Можете начинать общение.",
             reply_markup
         )
         
         await update_main_message(
             partner_id,
             context,
-            "Собеседник найден! Можете начинать общение.",
+            user_intro if user_intro else "Собеседник найден! Можете начинать общение.",
             reply_markup
         )
 
@@ -1004,6 +1064,68 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "Произошла ошибка при отправке сообщения. Попробуйте еще раз или используйте кнопки ниже для управления чатом.",
             reply_markup
         )
+
+    # Check if this is a profile setup age input message
+    state, step = await db.get_profile_setup_state(user_id)
+    
+    if state in [PROFILE_SETUP_AGE, "edit_age"] and message.text:
+        # Age input handling for profile setup or edit
+        try:
+            age = int(message.text.strip())
+            
+            # Validate age
+            if age < 10 or age > 100:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="Неверно указан возраст. Пожалуйста, введите число от 10 до 100."
+                )
+                return
+            
+            # Save age to profile
+            await db.save_user_profile(user_id, age=age)
+            
+            if state == PROFILE_SETUP_AGE:
+                # Continue with profile setup
+                await db.update_profile_setup_state(user_id, PROFILE_SETUP_INTERESTS, 4)
+                
+                # Get all interests
+                interests = await db.get_all_interests()
+                user_interests = await db.get_user_interests(user_id)
+                
+                # Prepare keyboard with interests
+                keyboard = []
+                row = []
+                for interest in interests:
+                    name = interest['name']
+                    display = f"✅ {name}" if name in user_interests else name
+                    row.append(InlineKeyboardButton(display, callback_data=f"interest_{name}"))
+                    if len(row) == 2:
+                        keyboard.append(row)
+                        row = []
+                if row:
+                    keyboard.append(row)
+                
+                keyboard.append([InlineKeyboardButton("Завершить", callback_data="complete_profile")])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update_main_message(
+                    user_id,
+                    context,
+                    "4 шаг из 4: Выберите интересы:",
+                    reply_markup
+                )
+            else:
+                # Age was edited in profile edit mode
+                await view_profile_command(update, context)
+            
+            return
+        except ValueError:
+            # Not a valid number
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="Пожалуйста, введите число от 10 до 100."
+            )
+            return
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /stop command."""
@@ -1701,6 +1823,451 @@ async def cleanup_db(application: Application) -> None:
     except Exception as e:
         logger.error(f"Error closing database connection: {e}")
 
+# Profile setup handlers
+async def setup_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for when user starts profile setup."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Set initial profile setup state
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_GENDER, 1)
+    
+    # Show gender selection
+    keyboard = [
+        [
+            InlineKeyboardButton("👱‍♂️ Мужской", callback_data="gender_male"),
+            InlineKeyboardButton("👩‍🦱 Женский", callback_data="gender_female")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text="1 шаг из 4: Выберите ваш пол:",
+        reply_markup=reply_markup
+    )
+    
+    await query.answer()
+
+async def skip_profile_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for when user skips profile setup."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Clear profile setup state
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_NONE, 0)
+    
+    # Show main menu
+    keyboard = [[InlineKeyboardButton("Начать поиск", callback_data="search_chat")],
+                [InlineKeyboardButton("Мой профиль", callback_data="view_profile")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text="Настройка профиля пропущена. Вы можете настроить профиль позже.\n\n"
+             "Нажмите кнопку ниже, чтобы начать поиск собеседника.",
+        reply_markup=reply_markup
+    )
+    
+    await query.answer()
+
+async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for gender selection."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Extract gender from callback data
+    gender = query.data.split("_")[1]  # gender_male or gender_female
+    
+    # Save gender to profile
+    await db.save_user_profile(user_id, gender=gender)
+    
+    # Update profile setup state
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_LOOKING_FOR, 2)
+    
+    # Show looking_for selection
+    keyboard = [
+        [
+            InlineKeyboardButton("Мужчину", callback_data="looking_for_male"),
+            InlineKeyboardButton("Женщину", callback_data="looking_for_female"),
+            InlineKeyboardButton("Неважно", callback_data="looking_for_any")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text="2 шаг из 4: Кого вы ищете:",
+        reply_markup=reply_markup
+    )
+    
+    await query.answer()
+
+async def set_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for looking_for selection."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Extract looking_for from callback data
+    looking_for = query.data.split("_")[-1]  # looking_for_male, looking_for_female, or looking_for_any
+    
+    # Save looking_for to profile
+    await db.save_user_profile(user_id, looking_for=looking_for)
+    
+    # Update profile setup state
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_AGE, 3)
+    
+    # Show age input prompt
+    await query.edit_message_text(
+        text="3 шаг из 4: Введите цифру с вашим возрастом"
+    )
+    
+    await query.answer()
+
+async def toggle_interest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for interest selection/deselection."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Get interest name from callback data
+    interest_name = query.data.split("_", 1)[1]
+    
+    # Get user's current interests
+    user_interests = await db.get_user_interests(user_id)
+    
+    if interest_name in user_interests:
+        # Remove interest
+        await db.remove_user_interest(user_id, interest_name)
+    else:
+        # Add interest
+        await db.save_user_interest(user_id, interest_name)
+    
+    # Get updated interests
+    updated_interests = await db.get_user_interests(user_id)
+    
+    # Get all interests
+    interests = await db.get_all_interests()
+    
+    # Prepare updated keyboard
+    keyboard = []
+    row = []
+    for interest in interests:
+        name = interest['name']
+        # Add checkmark if interest is selected
+        display = f"✅ {name}" if name in updated_interests else name
+        row.append(InlineKeyboardButton(display, callback_data=f"interest_{name}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    
+    # Add Complete button
+    keyboard.append([InlineKeyboardButton("Завершить", callback_data="complete_profile")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_reply_markup(reply_markup=reply_markup)
+    await query.answer()
+
+async def complete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for completing profile setup."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Update profile setup state to complete
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_COMPLETE, 0)
+    
+    # Get user's profile
+    profile = await db.get_user_profile(user_id)
+    interests = await db.get_user_interests(user_id)
+    
+    # Format profile information
+    gender_text = "Мужской" if profile.get('gender') == "male" else "Женский"
+    
+    looking_for_text = "Неважно"
+    if profile.get('looking_for') == "male":
+        looking_for_text = "Мужчину"
+    elif profile.get('looking_for') == "female":
+        looking_for_text = "Женщину"
+    
+    interests_text = ", ".join(interests) if interests else "Не указаны"
+    
+    # Show profile summary
+    await query.edit_message_text(
+        text=f"Ваш профиль настроен!\n\n"
+             f"Пол: {gender_text}\n"
+             f"Вы ищете: {looking_for_text}\n"
+             f"Возраст: {profile.get('age')}\n"
+             f"Интересы: {interests_text}\n\n"
+             f"Вы можете начать поиск собеседника или изменить профиль в любое время.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Начать поиск", callback_data="search_chat")],
+            [InlineKeyboardButton("Изменить профиль", callback_data="edit_profile")]
+        ])
+    )
+    
+    await query.answer()
+
+async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for viewing profile."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Get user's profile
+    profile = await db.get_user_profile(user_id)
+    interests = await db.get_user_interests(user_id)
+    
+    if not profile:
+        # No profile, offer to create one
+        await query.edit_message_text(
+            text="У вас еще нет настроенного профиля. Хотите настроить его сейчас?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Настроить профиль", callback_data="setup_profile")],
+                [InlineKeyboardButton("Позже", callback_data="search_chat")]
+            ])
+        )
+    else:
+        # Format profile information
+        gender_text = "Мужской" if profile.get('gender') == "male" else "Женский"
+        
+        looking_for_text = "Неважно"
+        if profile.get('looking_for') == "male":
+            looking_for_text = "Мужчину"
+        elif profile.get('looking_for') == "female":
+            looking_for_text = "Женщину"
+        
+        interests_text = ", ".join(interests) if interests else "Не указаны"
+        
+        # Show profile with edit options
+        await query.edit_message_text(
+            text=f"Ваш профиль:\n\n"
+                 f"Пол: {gender_text}\n"
+                 f"Вы ищете: {looking_for_text}\n"
+                 f"Возраст: {profile.get('age')}\n"
+                 f"Интересы: {interests_text}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Изменить профиль", callback_data="edit_profile")],
+                [InlineKeyboardButton("Начать поиск", callback_data="search_chat")]
+            ])
+        )
+    
+    await query.answer()
+
+async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for editing profile."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Show profile edit options
+    await query.edit_message_text(
+        text="Что вы хотите изменить?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Пол", callback_data="edit_gender")],
+            [InlineKeyboardButton("Кого ищете", callback_data="edit_looking_for")],
+            [InlineKeyboardButton("Возраст", callback_data="edit_age")],
+            [InlineKeyboardButton("Интересы", callback_data="edit_interests")],
+            [InlineKeyboardButton("Назад", callback_data="view_profile")]
+        ])
+    )
+    
+    await query.answer()
+
+async def edit_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for editing gender."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Show gender selection
+    keyboard = [
+        [
+            InlineKeyboardButton("👱‍♂️ Мужской", callback_data="gender_male"),
+            InlineKeyboardButton("👩‍🦱 Женский", callback_data="gender_female")
+        ],
+        [InlineKeyboardButton("Назад", callback_data="edit_profile")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text="Выберите ваш пол:",
+        reply_markup=reply_markup
+    )
+    
+    # Set temporary state for handling gender selection
+    await db.update_profile_setup_state(user_id, "edit_gender", 0)
+    
+    await query.answer()
+
+async def edit_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for editing looking_for."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Show looking_for selection
+    keyboard = [
+        [
+            InlineKeyboardButton("Мужчину", callback_data="looking_for_male"),
+            InlineKeyboardButton("Женщину", callback_data="looking_for_female"),
+            InlineKeyboardButton("Неважно", callback_data="looking_for_any")
+        ],
+        [InlineKeyboardButton("Назад", callback_data="edit_profile")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text="Кого вы ищете:",
+        reply_markup=reply_markup
+    )
+    
+    # Set temporary state for handling looking_for selection
+    await db.update_profile_setup_state(user_id, "edit_looking_for", 0)
+    
+    await query.answer()
+
+async def edit_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for editing age."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Show age input prompt
+    await query.edit_message_text(
+        text="Введите цифру с вашим возрастом",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Назад", callback_data="edit_profile")]
+        ])
+    )
+    
+    # Set temporary state for handling age input
+    await db.update_profile_setup_state(user_id, "edit_age", 0)
+    
+    await query.answer()
+
+async def edit_interests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for editing interests."""
+    if not update.callback_query or not update.effective_user:
+        return
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+    
+    # Get all interests
+    interests = await db.get_all_interests()
+    user_interests = await db.get_user_interests(user_id)
+    
+    # Prepare keyboard with interests
+    keyboard = []
+    row = []
+    for interest in interests:
+        name = interest['name']
+        # Add checkmark if interest is selected
+        display = f"✅ {name}" if name in user_interests else name
+        row.append(InlineKeyboardButton(display, callback_data=f"interest_{name}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    
+    # Add back button
+    keyboard.append([InlineKeyboardButton("Готово", callback_data="view_profile")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text="Выберите интересы:",
+        reply_markup=reply_markup
+    )
+    
+    # Set temporary state for handling interests selection
+    await db.update_profile_setup_state(user_id, "edit_interests", 0)
+    
+    await query.answer()
+
+async def view_profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Command handler for /profile."""
+    if not update.message or not update.effective_user:
+        return
+
+    user_id = update.effective_user.id
+    
+    # Get user's profile
+    profile = await db.get_user_profile(user_id)
+    interests = await db.get_user_interests(user_id)
+    
+    if not profile:
+        # No profile, offer to create one
+        keyboard = [
+            [InlineKeyboardButton("Настроить профиль", callback_data="setup_profile")],
+            [InlineKeyboardButton("Позже", callback_data="search_chat")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            "У вас еще нет настроенного профиля. Хотите настроить его сейчас?",
+            reply_markup
+        )
+    else:
+        # Format profile information
+        gender_text = "Мужской" if profile.get('gender') == "male" else "Женский"
+        
+        looking_for_text = "Неважно"
+        if profile.get('looking_for') == "male":
+            looking_for_text = "Мужчину"
+        elif profile.get('looking_for') == "female":
+            looking_for_text = "Женщину"
+        
+        interests_text = ", ".join(interests) if interests else "Не указаны"
+        
+        # Show profile with edit options
+        keyboard = [
+            [InlineKeyboardButton("Изменить профиль", callback_data="edit_profile")],
+            [InlineKeyboardButton("Начать поиск", callback_data="search_chat")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            f"Ваш профиль:\n\n"
+            f"Пол: {gender_text}\n"
+            f"Вы ищете: {looking_for_text}\n"
+            f"Возраст: {profile.get('age')}\n"
+            f"Интересы: {interests_text}",
+            reply_markup
+        )
+
 def main() -> None:
     """Start the bot."""
     # Check for required environment variables
@@ -1734,12 +2301,27 @@ def main() -> None:
     application.add_handler(CommandHandler("resend_media", resend_media))
     application.add_handler(CommandHandler("toggle_storage", toggle_storage_mode))
     application.add_handler(CommandHandler("import_media", import_media_to_db))
+    application.add_handler(CommandHandler("profile", view_profile_command))
     
     # Add callback query handlers
     application.add_handler(CallbackQueryHandler(search_chat, pattern="^search_chat$"))
     application.add_handler(CallbackQueryHandler(cancel_search, pattern="^cancel_search$"))
     application.add_handler(CallbackQueryHandler(stop_chat, pattern="^stop_chat$"))
     application.add_handler(CallbackQueryHandler(skip_chat, pattern="^skip_chat$"))
+    
+    # Add profile setup handlers
+    application.add_handler(CallbackQueryHandler(setup_profile, pattern="^setup_profile$"))
+    application.add_handler(CallbackQueryHandler(skip_profile_setup, pattern="^skip_profile_setup$"))
+    application.add_handler(CallbackQueryHandler(set_gender, pattern="^gender_"))
+    application.add_handler(CallbackQueryHandler(set_looking_for, pattern="^looking_for_"))
+    application.add_handler(CallbackQueryHandler(toggle_interest, pattern="^interest_"))
+    application.add_handler(CallbackQueryHandler(complete_profile, pattern="^complete_profile$"))
+    application.add_handler(CallbackQueryHandler(view_profile, pattern="^view_profile$"))
+    application.add_handler(CallbackQueryHandler(edit_profile, pattern="^edit_profile$"))
+    application.add_handler(CallbackQueryHandler(edit_gender, pattern="^edit_gender$"))
+    application.add_handler(CallbackQueryHandler(edit_looking_for, pattern="^edit_looking_for$"))
+    application.add_handler(CallbackQueryHandler(edit_age, pattern="^edit_age$"))
+    application.add_handler(CallbackQueryHandler(edit_interests, pattern="^edit_interests$"))
     
     # Add handler for service messages (should be before general message handler)
     application.add_handler(MessageHandler(
