@@ -3,7 +3,9 @@ import logging
 import asyncio
 import signal
 from datetime import datetime
-from typing import Dict, Optional, Set, List
+import uuid
+import pathlib
+from typing import Dict, Optional, Set, List, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -32,6 +34,58 @@ ACTIVE_CHATS: Dict[int, int] = {}  # Dictionary of active chats: user_id -> part
 USER_MESSAGES: Dict[int, List[int]] = {}  # Dictionary to store message IDs for each user
 MAIN_MESSAGE_IDS: Dict[int, int] = {}  # Dictionary to store main message ID for each user: user_id -> message_id
 PIN_MESSAGE_IDS: Dict[int, int] = {}  # Dictionary to store pin notification message IDs: user_id -> message_id
+
+# Директория для хранения медиафайлов
+MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
+os.makedirs(MEDIA_DIR, exist_ok=True)
+
+async def download_media_file(context: ContextTypes.DEFAULT_TYPE, file_id: str, message_type: str) -> Tuple[str, str]:
+    """
+    Скачивает медиафайл из Telegram и сохраняет его локально.
+    
+    Args:
+        context: Контекст телеграм-бота
+        file_id: ID файла в Telegram
+        message_type: Тип сообщения (photo, video, voice, sticker, video_note)
+        
+    Returns:
+        Tuple[str, str]: (Путь к сохраненному файлу, расширение файла)
+    """
+    # Создаем директории для каждого типа медиа, если они не существуют
+    media_type_dir = os.path.join(MEDIA_DIR, message_type)
+    os.makedirs(media_type_dir, exist_ok=True)
+    
+    # Получаем файл из Telegram
+    file = await context.bot.get_file(file_id)
+    
+    # Определяем расширение файла на основе типа медиа
+    extensions = {
+        "photo": ".jpg",
+        "video": ".mp4",
+        "voice": ".ogg",
+        "sticker": ".webp",
+        "video_note": ".mp4"
+    }
+    extension = extensions.get(message_type, "")
+    
+    # Пытаемся получить расширение из URL, если оно есть
+    if file.file_path and "." in file.file_path:
+        orig_extension = pathlib.Path(file.file_path).suffix
+        if orig_extension:
+            extension = orig_extension
+    
+    # Генерируем уникальное имя файла
+    unique_filename = f"{uuid.uuid4()}{extension}"
+    file_path = os.path.join(media_type_dir, unique_filename)
+    
+    # Скачиваем файл
+    try:
+        await file.download_to_drive(custom_path=file_path)
+        logger.info(f"Downloaded {message_type} to {file_path}")
+        return file_path, extension
+    except Exception as e:
+        logger.error(f"Error downloading {message_type}: {e}")
+        return None, extension
 
 async def delete_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Delete all messages for a user."""
@@ -635,8 +689,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id, partner_id = active_chat
 
     try:
+        # Скачиваем медиафайл, если это не текстовое сообщение
+        local_file_path = None
+        if message_type != "text" and file_id:
+            local_file_path, _ = await download_media_file(context, file_id, message_type)
+        
         # Store message in database (все типы сообщений)
-        await db.add_message(chat_id, user_id, content, message_type, file_id)
+        await db.add_message(chat_id, user_id, content, message_type, file_id, local_file_path)
         
         # Store original message ID for cleanup
         if user_id not in USER_MESSAGES:
@@ -986,6 +1045,142 @@ async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_T
             except Exception as e:
                 logger.error(f"Error handling potential service message: {e}")
 
+async def media_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show statistics about saved media files."""
+    if not update.message or not update.effective_user:
+        return
+
+    user_id = update.effective_user.id
+    
+    # Check if user is in chat
+    active_chat = await db.get_active_chat(user_id)
+    if not active_chat:
+        await update.message.reply_text("Вы не находитесь в активном чате.")
+        return
+
+    chat_id, partner_id = active_chat
+    
+    try:
+        # Получаем все медиа-сообщения в чате
+        media_messages = await db.get_chat_media(chat_id)
+        
+        if not media_messages:
+            await update.message.reply_text("В текущем чате нет медиафайлов.")
+            return
+        
+        # Считаем статистику по типам
+        media_stats = {}
+        local_files_count = 0
+        
+        for msg in media_messages:
+            msg_type = msg['message_type']
+            if msg_type not in media_stats:
+                media_stats[msg_type] = 0
+            media_stats[msg_type] += 1
+            
+            if msg['local_file_path']:
+                local_files_count += 1
+        
+        # Формируем ответ
+        stats_text = "📊 Статистика медиафайлов в чате:\n\n"
+        
+        for media_type, count in media_stats.items():
+            emoji = {
+                'photo': '🖼️',
+                'video': '🎬',
+                'voice': '🎤',
+                'sticker': '🎭',
+                'video_note': '🎥'
+            }.get(media_type, '📎')
+            
+            stats_text += f"{emoji} {media_type}: {count}\n"
+        
+        total_media = len(media_messages)
+        stats_text += f"\n📁 Всего медиафайлов: {total_media}"
+        stats_text += f"\n💾 Сохранено локально: {local_files_count} ({int(local_files_count/total_media*100)}%)"
+        
+        # Проверяем размер локальных файлов
+        total_size = 0
+        for msg in media_messages:
+            if msg['local_file_path'] and os.path.exists(msg['local_file_path']):
+                total_size += os.path.getsize(msg['local_file_path'])
+        
+        if total_size > 0:
+            # Конвертируем байты в более читаемый формат
+            if total_size < 1024:
+                size_str = f"{total_size} B"
+            elif total_size < 1024 * 1024:
+                size_str = f"{total_size / 1024:.1f} KB"
+            else:
+                size_str = f"{total_size / (1024 * 1024):.1f} MB"
+                
+            stats_text += f"\n📊 Размер локальных файлов: {size_str}"
+        
+        await update.message.reply_text(stats_text)
+        
+    except Exception as e:
+        logger.error(f"Error getting media stats: {e}")
+        await update.message.reply_text("Произошла ошибка при получении статистики медиафайлов.")
+
+async def resend_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Resend the last media file from local storage."""
+    if not update.message or not update.effective_user:
+        return
+
+    user_id = update.effective_user.id
+    
+    # Check if user is in chat
+    active_chat = await db.get_active_chat(user_id)
+    if not active_chat:
+        await update.message.reply_text("Вы не находитесь в активном чате.")
+        return
+
+    chat_id, partner_id = active_chat
+    
+    try:
+        # Получаем последнее медиа-сообщение с локальным файлом
+        media_messages = await db.get_chat_media(chat_id)
+        
+        if not media_messages:
+            await update.message.reply_text("В текущем чате нет медиафайлов.")
+            return
+        
+        # Ищем последнее сообщение с существующим локальным файлом
+        local_message = None
+        for msg in media_messages:
+            if msg['local_file_path'] and os.path.exists(msg['local_file_path']):
+                local_message = msg
+                break
+        
+        if not local_message:
+            await update.message.reply_text("Нет доступных локально сохранённых медиафайлов.")
+            return
+        
+        # Отправляем файл обратно пользователю
+        file_path = local_message['local_file_path']
+        message_type = local_message['message_type']
+        
+        await update.message.reply_text(f"Повторная отправка {message_type} из локального хранилища...")
+        
+        with open(file_path, 'rb') as file:
+            if message_type == "photo":
+                await context.bot.send_photo(chat_id=user_id, photo=file)
+            elif message_type == "video":
+                await context.bot.send_video(chat_id=user_id, video=file)
+            elif message_type == "voice":
+                await context.bot.send_voice(chat_id=user_id, voice=file)
+            elif message_type == "sticker":
+                # Для стикеров нельзя использовать локальный файл, отправляем по file_id
+                await context.bot.send_sticker(chat_id=user_id, sticker=local_message['file_id'])
+            elif message_type == "video_note":
+                await context.bot.send_video_note(chat_id=user_id, video_note=file)
+        
+        await update.message.reply_text(f"Медиафайл успешно отправлен из локального хранилища.\nПуть: {file_path}")
+        
+    except Exception as e:
+        logger.error(f"Error resending media: {e}")
+        await update.message.reply_text("Произошла ошибка при отправке медиафайла.")
+
 async def init_db(application: Application) -> None:
     """Initialize database connection."""
     try:
@@ -1016,6 +1211,8 @@ def main() -> None:
     application.add_handler(CommandHandler("pin", pin_message))
     application.add_handler(CommandHandler("unpin", unpin_message))
     application.add_handler(CommandHandler("clear", clear_history))
+    application.add_handler(CommandHandler("media_stats", media_stats))
+    application.add_handler(CommandHandler("resend_media", resend_media))
     application.add_handler(CallbackQueryHandler(search_chat, pattern="^search_chat$"))
     application.add_handler(CallbackQueryHandler(cancel_search, pattern="^cancel_search$"))
     application.add_handler(CallbackQueryHandler(stop_chat, pattern="^stop_chat$"))

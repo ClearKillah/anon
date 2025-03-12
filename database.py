@@ -2,6 +2,7 @@ import asyncpg
 import logging
 from typing import Optional, List, Tuple
 from datetime import datetime
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -179,18 +180,36 @@ class Database:
                 await conn.execute('DELETE FROM active_chats WHERE chat_id = $1', chat_id)
 
     async def clear_chat_messages(self, chat_id: int):
-        """Clear all messages from a chat."""
+        """Clear all messages from a chat and delete local media files."""
         async with self.pool.acquire() as conn:
+            # Получаем пути к локальным файлам перед удалением сообщений
+            media_files = await conn.fetch('''
+                SELECT local_file_path FROM messages 
+                WHERE chat_id = $1 AND local_file_path IS NOT NULL
+            ''', chat_id)
+            
+            # Удаляем локальные файлы
+            for row in media_files:
+                file_path = row['local_file_path']
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        logging.info(f"Deleted local file: {file_path}")
+                    except Exception as e:
+                        logging.error(f"Error deleting local file {file_path}: {e}")
+            
+            # Удаляем сообщения из базы данных
             await conn.execute('DELETE FROM messages WHERE chat_id = $1', chat_id)
 
     # Message operations
-    async def add_message(self, chat_id: int, sender_id: int, content: str = None, message_type: str = 'text', file_id: str = None):
+    async def add_message(self, chat_id: int, sender_id: int, content: str = None, 
+                         message_type: str = 'text', file_id: str = None, local_file_path: str = None):
         """Add a new message to the database."""
         async with self.pool.acquire() as conn:
             await conn.execute('''
-                INSERT INTO messages (chat_id, sender_id, content, message_type, file_id)
-                VALUES ($1, $2, $3, $4, $5)
-            ''', chat_id, sender_id, content, message_type, file_id)
+                INSERT INTO messages (chat_id, sender_id, content, message_type, file_id, local_file_path)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            ''', chat_id, sender_id, content, message_type, file_id, local_file_path)
 
     # User state operations
     async def set_user_searching(self, user_id: int, is_searching: bool):
@@ -283,6 +302,48 @@ class Database:
                     ''')
                     
                     logger.info("Migration completed successfully")
+            
+            # Проверка существования колонки local_file_path
+            local_file_path_exists = await conn.fetchval('''
+                SELECT EXISTS (
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'messages' AND column_name = 'local_file_path'
+                )
+            ''')
+            
+            # Если колонки local_file_path нет, добавляем её
+            if not local_file_path_exists:
+                logger.info("Migrating messages table to support local file storage")
+                async with conn.transaction():
+                    # Добавляем колонку local_file_path
+                    await conn.execute('''
+                        ALTER TABLE messages 
+                        ADD COLUMN local_file_path TEXT
+                    ''')
+                    
+                    logger.info("Local file path migration completed successfully")
+
+    async def get_message_media(self, message_id: int):
+        """Get media information for a message."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow('''
+                SELECT message_type, file_id, local_file_path 
+                FROM messages 
+                WHERE id = $1
+            ''', message_id)
+            return row
+    
+    async def get_chat_media(self, chat_id: int):
+        """Get all media messages from a chat."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch('''
+                SELECT id, sender_id, message_type, file_id, local_file_path, sent_at 
+                FROM messages 
+                WHERE chat_id = $1 AND message_type != 'text'
+                ORDER BY sent_at DESC
+            ''', chat_id)
+            return rows
 
 # Create global database instance
 db = Database() 
