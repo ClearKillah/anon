@@ -202,6 +202,18 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await db.set_user_searching(user_id, False)
         await db.set_user_searching(partner_id, False)
 
+        # Инициализируем пустые списки сообщений ПЕРЕД очисткой,
+        # чтобы не удалять сообщения, которые будут отправлены после создания чата
+        if user_id not in USER_MESSAGES:
+            USER_MESSAGES[user_id] = []
+        else:
+            USER_MESSAGES[user_id] = []
+            
+        if partner_id not in USER_MESSAGES:
+            USER_MESSAGES[partner_id] = []
+        else:
+            USER_MESSAGES[partner_id] = []
+
         # Clear previous chat history from Telegram (but keep in DB)
         await delete_messages(user_id, context)
         await delete_messages(partner_id, context)
@@ -487,6 +499,17 @@ async def skip_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Set both users as not searching
             await db.set_user_searching(user_id, False)
             await db.set_user_searching(new_partner_id, False)
+
+            # Инициализируем пустые списки сообщений для нового чата
+            if user_id not in USER_MESSAGES:
+                USER_MESSAGES[user_id] = []
+            else:
+                USER_MESSAGES[user_id] = []
+                
+            if new_partner_id not in USER_MESSAGES:
+                USER_MESSAGES[new_partner_id] = []
+            else:
+                USER_MESSAGES[new_partner_id] = []
 
             # Send messages to both users
             keyboard = [
@@ -879,15 +902,30 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         # Clear messages from database
         await db.clear_chat_messages(chat_id)
         
+        # Инициализируем пустые списки сообщений после удаления
+        if user_id not in USER_MESSAGES:
+            USER_MESSAGES[user_id] = []
+        else:
+            USER_MESSAGES[user_id] = []
+            
+        if partner_id not in USER_MESSAGES:
+            USER_MESSAGES[partner_id] = []
+        else:
+            USER_MESSAGES[partner_id] = []
+        
         # Send notifications
-        await context.bot.send_message(
+        message1 = await context.bot.send_message(
             chat_id=user_id,
             text="История чата очищена!"
         )
-        await context.bot.send_message(
+        message2 = await context.bot.send_message(
             chat_id=partner_id,
             text="Собеседник очистил историю чата!"
         )
+        
+        # Сохраняем ID сообщений для возможного удаления в будущем
+        USER_MESSAGES[user_id].append(message1.message_id)
+        USER_MESSAGES[partner_id].append(message2.message_id)
     except Exception as e:
         logger.error(f"Error clearing history: {e}")
         await update.message.reply_text("Не удалось очистить историю чата.")
