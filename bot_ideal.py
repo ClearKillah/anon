@@ -467,13 +467,15 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         partner_info = "**Собеседник найден\\!**\n\n"
         if partner_profile:
             if partner_profile.get('gender'):
-                partner_info += f"• Пол: {partner_profile['gender']}\n"
+                gender_text = "👱‍♂️ Мужской" if partner_profile['gender'] == "male" else "👩‍🦱 Женский"
+                partner_info += f"• Пол: {gender_text}\n"
             if partner_profile.get('age'):
                 partner_info += f"• Возраст: {partner_profile['age']}\n"
             if partner_profile.get('interests'):
                 interests = partner_profile['interests']
                 if interests:
-                    partner_info += f"• Интересы: {', '.join(interests)}\n"
+                    interests_text = ", ".join([f"✅ {interest}" for interest in interests])
+                    partner_info += f"• Интересы: {interests_text}\n"
         
         # Send messages to both users with partner info
         keyboard = CHAT_CONTROL_KEYBOARD
@@ -491,13 +493,15 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_info = "**Собеседник найден\\!**\n\n"
         if user_profile:
             if user_profile.get('gender'):
-                user_info += f"• Пол: {user_profile['gender']}\n"
+                gender_text = "👱‍♂️ Мужской" if user_profile['gender'] == "male" else "👩‍🦱 Женский"
+                user_info += f"• Пол: {gender_text}\n"
             if user_profile.get('age'):
                 user_info += f"• Возраст: {user_profile['age']}\n"
             if user_profile.get('interests'):
                 interests = user_profile['interests']
                 if interests:
-                    user_info += f"• Интересы: {', '.join(interests)}\n"
+                    interests_text = ", ".join([f"✅ {interest}" for interest in interests])
+                    user_info += f"• Интересы: {interests_text}\n"
         
         partner_message = await update_main_message(
             partner_id,
@@ -768,25 +772,29 @@ async def skip_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             partner_info = "**Собеседник найден\\!**\n\n"
             if partner_profile:
                 if partner_profile.get('gender'):
-                    partner_info += f"• Пол: {partner_profile['gender']}\n"
+                    gender_text = "👱‍♂️ Мужской" if partner_profile['gender'] == "male" else "👩‍🦱 Женский"
+                    partner_info += f"• Пол: {gender_text}\n"
                 if partner_profile.get('age'):
                     partner_info += f"• Возраст: {partner_profile['age']}\n"
                 if partner_profile.get('interests'):
                     interests = partner_profile['interests']
                     if interests:
-                        partner_info += f"• Интересы: {', '.join(interests)}\n"
+                        interests_text = ", ".join([f"✅ {interest}" for interest in interests])
+                        partner_info += f"• Интересы: {interests_text}\n"
 
             # Prepare user info message for partner
             user_info = "**Собеседник найден\\!**\n\n"
             if user_profile:
                 if user_profile.get('gender'):
-                    user_info += f"• Пол: {user_profile['gender']}\n"
+                    gender_text = "👱‍♂️ Мужской" if user_profile['gender'] == "male" else "👩‍🦱 Женский"
+                    user_info += f"• Пол: {gender_text}\n"
                 if user_profile.get('age'):
                     user_info += f"• Возраст: {user_profile['age']}\n"
                 if user_profile.get('interests'):
                     interests = user_profile['interests']
                     if interests:
-                        user_info += f"• Интересы: {', '.join(interests)}\n"
+                        interests_text = ", ".join([f"✅ {interest}" for interest in interests])
+                        user_info += f"• Интересы: {interests_text}\n"
 
             # Send messages to both users
             keyboard = [
