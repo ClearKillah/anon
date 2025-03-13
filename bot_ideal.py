@@ -462,6 +462,7 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # Get partner's profile
         partner_profile = await db.get_user_profile(partner_id)
+        partner_interests = await db.get_user_interests(partner_id)
         
         # Prepare partner info message
         partner_info = "**Собеседник найден\\!**\n\n"
@@ -471,11 +472,9 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 partner_info += f"• Пол: {gender_text}\n"
             if partner_profile.get('age'):
                 partner_info += f"• Возраст: {partner_profile['age']}\n"
-            if partner_profile.get('interests'):
-                interests = partner_profile['interests']
-                if interests:
-                    interests_text = ", ".join([f"✅ {interest}" for interest in interests])
-                    partner_info += f"• Интересы: {interests_text}\n"
+            if partner_interests:
+                interests_text = ", ".join([f"✅ {interest}" for interest in partner_interests])
+                partner_info += f"• Интересы: {interests_text}\n"
         
         # Send messages to both users with partner info
         keyboard = CHAT_CONTROL_KEYBOARD
@@ -497,11 +496,9 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 user_info += f"• Пол: {gender_text}\n"
             if user_profile.get('age'):
                 user_info += f"• Возраст: {user_profile['age']}\n"
-            if user_profile.get('interests'):
-                interests = user_profile['interests']
-                if interests:
-                    interests_text = ", ".join([f"✅ {interest}" for interest in interests])
-                    user_info += f"• Интересы: {interests_text}\n"
+            if user_interests:
+                interests_text = ", ".join([f"✅ {interest}" for interest in user_interests])
+                user_info += f"• Интересы: {interests_text}\n"
         
         partner_message = await update_main_message(
             partner_id,
@@ -767,6 +764,8 @@ async def skip_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Get profiles for both users
             user_profile = await db.get_user_profile(user_id)
             partner_profile = await db.get_user_profile(new_partner_id)
+            user_interests = await db.get_user_interests(user_id)
+            partner_interests = await db.get_user_interests(new_partner_id)
 
             # Prepare partner info message
             partner_info = "**Собеседник найден\\!**\n\n"
@@ -776,11 +775,9 @@ async def skip_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     partner_info += f"• Пол: {gender_text}\n"
                 if partner_profile.get('age'):
                     partner_info += f"• Возраст: {partner_profile['age']}\n"
-                if partner_profile.get('interests'):
-                    interests = partner_profile['interests']
-                    if interests:
-                        interests_text = ", ".join([f"✅ {interest}" for interest in interests])
-                        partner_info += f"• Интересы: {interests_text}\n"
+                if partner_interests:
+                    interests_text = ", ".join([f"✅ {interest}" for interest in partner_interests])
+                    partner_info += f"• Интересы: {interests_text}\n"
 
             # Prepare user info message for partner
             user_info = "**Собеседник найден\\!**\n\n"
@@ -790,11 +787,9 @@ async def skip_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     user_info += f"• Пол: {gender_text}\n"
                 if user_profile.get('age'):
                     user_info += f"• Возраст: {user_profile['age']}\n"
-                if user_profile.get('interests'):
-                    interests = user_profile['interests']
-                    if interests:
-                        interests_text = ", ".join([f"✅ {interest}" for interest in interests])
-                        user_info += f"• Интересы: {interests_text}\n"
+                if user_interests:
+                    interests_text = ", ".join([f"✅ {interest}" for interest in user_interests])
+                    user_info += f"• Интересы: {interests_text}\n"
 
             # Send messages to both users
             keyboard = [
