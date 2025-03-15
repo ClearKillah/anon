@@ -1,0 +1,1 @@
+with open("bot.py", "r") as f: lines = f.readlines(); [lines.__setitem__(i, "        " + lines[i].lstrip()) if 2420 <= i < 2460 and lines[i].strip() else None for i in range(len(lines))]; with open("bot.py", "w") as f: f.writelines(lines); print("Отступы исправлены")

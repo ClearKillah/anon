@@ -1,0 +1,16 @@
+async def send_main_menu_with_animation(
+    user_id: int, 
+    context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Send animation and main menu message for a user.
+    Now just a wrapper around update_main_message_with_animation.
+    
+    Args:
+        user_id: Telegram user ID
+        context: Telegram bot context
+    """
+    keyboard = MAIN_MENU_KEYBOARD
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update_main_message_with_animation(user_id, context, reply_markup)
+

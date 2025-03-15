@@ -1,0 +1,5 @@
+python-telegram-bot==20.7
+python-dotenv==1.0.0
+asyncpg==0.29.0
+# logging is a standard library module, not a package
+aiofiles==23.2.1 

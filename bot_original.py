@@ -6,7 +6,7 @@ from datetime import datetime
 import uuid
 import pathlib
 from typing import Dict, Optional, Set, List, Tuple, Union, Any, cast
-import telegram
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
     Application,
@@ -19,6 +19,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 from database import db
 import aiofiles
+import aiosqlite
 
 # Enable logging
 logging.basicConfig(
@@ -29,6 +30,11 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
+# Get bot token from environment variables
+TOKEN = os.getenv('BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("No BOT_TOKEN found in environment variables")
+
 # Common text constants
 MAIN_MENU_TEXT = "*👨🏻‍💻 DOX: Анонимный Чат*\n\n" \
                  "• Полностью бесплатно;\n" \
@@ -37,9 +43,9 @@ MAIN_MENU_TEXT = "*👨🏻‍💻 DOX: Анонимный Чат*\n\n" \
 
 # Common keyboard layouts
 MAIN_MENU_KEYBOARD = [
-    [InlineKeyboardButton("🔍 Начать поиск", callback_data="search_chat")],
-    [InlineKeyboardButton("👤 Профиль", callback_data="view_profile")],
-    [InlineKeyboardButton("❓ Поддержка", url="https://t.me/DoxGames_bot")]
+    [InlineKeyboardButton("Начать поиск", callback_data="start_search")],
+    [InlineKeyboardButton("Мой профиль", callback_data="view_profile")],
+    [InlineKeyboardButton("Настройки", callback_data="settings")]
 ]
 
 CHAT_CONTROL_KEYBOARD = [
@@ -49,11 +55,71 @@ CHAT_CONTROL_KEYBOARD = [
     ]
 ]
 
-SEARCH_KEYBOARD = [[InlineKeyboardButton("❌ Отменить поиск", callback_data="cancel_search")]]
+SEARCH_KEYBOARD = [
+    [InlineKeyboardButton("Отменить поиск", callback_data="cancel_search")]
+]
+
+RATE_CHAT_KEYBOARD = [
+    [
+        InlineKeyboardButton("💋 Поцелуй", callback_data="rate_kiss"),
+        InlineKeyboardButton("💰 Деньги", callback_data="rate_money"),
+        InlineKeyboardButton("🤡 Клоун", callback_data="rate_clown"),
+    ],
+    [InlineKeyboardButton("⏩ Пропустить оценку", callback_data="skip_rating")]
+]
 
 PROFILE_SETUP_KEYBOARD = [
     [InlineKeyboardButton("👤 Настроить профиль", callback_data="setup_profile")],
-    [InlineKeyboardButton("↩️ Пропустить настройку", callback_data="skip_profile_setup")]
+    [InlineKeyboardButton("Пропустить настройку", callback_data="skip_profile_setup")]
+]
+
+CHAT_KEYBOARD = [
+    [InlineKeyboardButton("Завершить чат", callback_data="end_chat")],
+    [InlineKeyboardButton("Начать новый поиск", callback_data="start_search")]
+]
+
+PROFILE_KEYBOARD = [
+    [InlineKeyboardButton("Редактировать профиль", callback_data="edit_profile")],
+    [InlineKeyboardButton("Назад", callback_data="back_to_main")]
+]
+
+EDIT_PROFILE_KEYBOARD = [
+    [InlineKeyboardButton("Пол", callback_data="edit_gender")],
+    [InlineKeyboardButton("Кого ищу", callback_data="edit_looking_for")],
+    [InlineKeyboardButton("Возраст", callback_data="edit_age")],
+    [InlineKeyboardButton("Интересы", callback_data="edit_interests")],
+    [InlineKeyboardButton("Назад", callback_data="view_profile")]
+]
+
+GENDER_KEYBOARD = [
+    [InlineKeyboardButton("Мужской", callback_data="gender_male")],
+    [InlineKeyboardButton("Женский", callback_data="gender_female")],
+    [InlineKeyboardButton("Другой", callback_data="gender_other")],
+    [InlineKeyboardButton("Назад", callback_data="edit_profile")]
+]
+
+LOOKING_FOR_KEYBOARD = [
+    [InlineKeyboardButton("Мужчин", callback_data="looking_for_male")],
+    [InlineKeyboardButton("Женщин", callback_data="looking_for_female")],
+    [InlineKeyboardButton("Всех", callback_data="looking_for_all")],
+    [InlineKeyboardButton("Назад", callback_data="edit_profile")]
+]
+
+AGE_KEYBOARD = [
+    [InlineKeyboardButton("18-24", callback_data="age_18-24")],
+    [InlineKeyboardButton("25-34", callback_data="age_25-34")],
+    [InlineKeyboardButton("35-44", callback_data="age_35-44")],
+    [InlineKeyboardButton("45+", callback_data="age_45+")],
+    [InlineKeyboardButton("Назад", callback_data="edit_profile")]
+]
+
+INTERESTS_KEYBOARD = [
+    [InlineKeyboardButton("Музыка", callback_data="interests_music")],
+    [InlineKeyboardButton("Спорт", callback_data="interests_sports")],
+    [InlineKeyboardButton("Путешествия", callback_data="interests_travel")],
+    [InlineKeyboardButton("Кино", callback_data="interests_movies")],
+    [InlineKeyboardButton("Книги", callback_data="interests_books")],
+    [InlineKeyboardButton("Назад", callback_data="edit_profile")]
 ]
 
 class BotState:
@@ -77,8 +143,6 @@ class BotState:
         self.chat_initialization: Dict[int, bool] = {}
         # Whether to store media in the database (True) or on disk (False)
         self.store_media_in_db: bool = True
-        # Dictionary to track if animation was shown to user
-        self.animation_shown: Dict[int, bool] = {}
 
 class ChatManager:
     """
@@ -94,64 +158,33 @@ class ChatManager:
         """
         self.state = state
     
-    async def start_search(self, user_id: int, context: ContextTypes.DEFAULT_TYPE, skip_message: bool = False) -> None:
+    async def start_search(self, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Start searching for a chat partner for the user.
         
         Args:
             user_id: Telegram user ID
             context: Telegram bot context
-            skip_message: If True, skip sending the search message (used when message is already shown)
         """
-        # Проверяем, не находится ли пользователь уже в чате
-        if user_id in self.state.active_chats or await db.get_active_chat(user_id):
-            keyboard = CHAT_CONTROL_KEYBOARD
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update_main_message(
-                user_id,
-                context,
-                "Вы уже находитесь в активном чате\\. Используйте кнопки ниже для управления чатом\\.",
-                reply_markup
-            )
-            return
-            
-        # Проверяем, не ищет ли пользователь уже собеседника
-        searching_users = await db.get_searching_users()
-        if user_id in searching_users:
-            keyboard = SEARCH_KEYBOARD
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update_main_message(
-                user_id,
-                context,
-                "🔍 *Поиск собеседника*\n\n"
-                "Вы уже ищете собеседника\\. Пожалуйста, подождите\\.\n\n"
-                "Когда кто\\-то будет найден, я вам сообщу\\.",
-                reply_markup
-            )
-            return
-            
         # Add user to searching list
         self.state.users_searching.add(user_id)
         
         # Also mark user as searching in the database
         await db.set_user_searching(user_id, True)
         
-        # Update main message with search status only if not skipped
-        if not skip_message:
-            keyboard = SEARCH_KEYBOARD
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update_main_message(
-                user_id,
-                context,
-                "🔍 *Поиск собеседника*\n\n"
-                "Ищем для вас собеседника\\.\n"
-                "Это может занять некоторое время\\.\n\n"
-                "Когда кто\\-то будет найден, я вам сообщу\\.",
-                reply_markup
-            )
+        # Update main message with search status
+        keyboard = SEARCH_KEYBOARD
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            "🔍 *Поиск собеседника*\n\n"
+            "Ищем для вас собеседника\\.\n"
+            "Это может занять некоторое время\\.\n\n"
+            "Когда кто\\-то будет найден, я вам сообщу\\.",
+            reply_markup
+        )
     
     async def cancel_search(self, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
@@ -161,33 +194,22 @@ class ChatManager:
             user_id: Telegram user ID
             context: Telegram bot context
         """
-        # Проверяем, находится ли пользователь в поиске
-        searching_users = await db.get_searching_users()
-        if user_id not in searching_users and user_id not in self.state.users_searching:
+        if user_id in self.state.users_searching:
+            # Remove user from searching list
+            self.state.users_searching.discard(user_id)
+            
+            # Update database status
+            await db.set_user_searching(user_id, False)
+            
             # Return to main menu
             reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-            await update_main_message(
+            await send_menu_message(
                 user_id,
                 context,
                 MAIN_MENU_TEXT,
-                reply_markup
+                reply_markup,
+                is_main_menu=True
             )
-            return
-            
-        # Remove user from searching list
-        self.state.users_searching.discard(user_id)
-        
-        # Update database status
-        await db.set_user_searching(user_id, False)
-        
-        # Return to main menu
-        reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-        await update_main_message(
-            user_id,
-            context,
-            MAIN_MENU_TEXT,
-            reply_markup
-        )
     
     async def create_chat(self, user_id: int, partner_id: int, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
         """
@@ -235,20 +257,15 @@ class ChatManager:
         user_profile_text = await self._format_profile_info(user_profile, user_interests)
         partner_profile_text = await self._format_profile_info(partner_profile, partner_interests)
         
-        # Create keyboard with buttons in separate rows
-        # First button will be shown in pinned area, second button below the message
-        chat_keyboard = [
-            [InlineKeyboardButton("⏭️ Пропустить собеседника", callback_data="skip_chat")],
-            [InlineKeyboardButton("❌ Завершить чат", callback_data="stop_chat")]
-        ]
-        chat_markup = InlineKeyboardMarkup(chat_keyboard)
-        
         # Send chat started messages to both users
+        keyboard = CHAT_CONTROL_KEYBOARD
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         user_message = await context.bot.send_message(
             chat_id=user_id,
             text=f"✅ *Собеседник найден\\!*\n\n"
                  f"{partner_profile_text}",
-            reply_markup=chat_markup,
+            reply_markup=reply_markup,
             parse_mode="MarkdownV2"
         )
         
@@ -256,27 +273,33 @@ class ChatManager:
             chat_id=partner_id,
             text=f"✅ *Собеседник найден\\!*\n\n"
                  f"{user_profile_text}",
-            reply_markup=chat_markup,
+            reply_markup=reply_markup,
             parse_mode="MarkdownV2"
         )
         
-        # Pin the partner info messages
+        # Автоматически закрепляем информацию о профиле собеседника для обоих пользователей
         try:
+            # Закрепляем сообщение для первого пользователя
             await user_message.pin(disable_notification=True)
-            await partner_message.pin(disable_notification=True)
-            
-            # Delete pin notifications
+            # Удаляем уведомление о закреплении
             await asyncio.sleep(1)
             await delete_pin_message(user_id, context)
+            
+            # Закрепляем сообщение для второго пользователя
+            await partner_message.pin(disable_notification=True)
+            # Удаляем уведомление о закреплении
+            await asyncio.sleep(1)
             await delete_pin_message(partner_id, context)
+            
+            logger.info(f"Auto-pinned profile messages for chat {chat_id}")
         except Exception as e:
-            logger.error(f"Error pinning partner info messages: {e}")
+            logger.error(f"Error auto-pinning profile messages: {e}")
         
         # Store first messages to protect from deletion
         self.state.first_messages[user_id] = user_message.message_id
         self.state.first_messages[partner_id] = partner_message.message_id
         
-        # Add messages to user_messages
+        # Add these to user_messages
         if user_id not in self.state.user_messages:
             self.state.user_messages[user_id] = []
         self.state.user_messages[user_id].append(user_message.message_id)
@@ -379,57 +402,50 @@ class ChatManager:
         if not result:
             return False
         
-        # Automatically unpin messages for both users
+        # Автоматически откреплям закрепленные сообщения в чате для обоих пользователей
         try:
-            # Unpin messages for both users
-            await context.bot.unpin_all_chat_messages(chat_id=user_id)
-            await context.bot.unpin_all_chat_messages(chat_id=partner_id)
+            # Открепляем сообщения для первого пользователя
+            user_chat = await context.bot.get_chat(user_id)
+            if user_chat.pinned_message:
+                await user_chat.unpin_message()
+                # Удаляем уведомление об откреплении
+                await delete_pin_message(user_id, context)
             
-            # Delete pin notifications
-            try:
-                # Try to delete pin notifications multiple times
-                for _ in range(3):
-                    await delete_pin_message(user_id, context)
-                    await delete_pin_message(partner_id, context)
-                    await asyncio.sleep(0.5)
-            except Exception as e:
-                logger.error(f"Error deleting pin messages: {e}")
+            # Открепляем сообщения для второго пользователя
+            partner_chat = await context.bot.get_chat(partner_id)
+            if partner_chat.pinned_message:
+                await partner_chat.unpin_message()
+                # Удаляем уведомление об откреплении
+                await delete_pin_message(partner_id, context)
         except Exception as e:
             logger.error(f"Error unpinning messages: {e}")
         
-        # Clear messages from both users
-        await delete_messages(user_id, context)
-        await delete_messages(partner_id, context)
+        # Show ending message to both users
+        keyboard = MAIN_MENU_KEYBOARD
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        # Remove from active chats dictionary
+        # Send messages to both users
+        await update_main_message(
+            user_id,
+            context,
+            "Чат завершен\\. Нажмите кнопку ниже, чтобы начать новый поиск\\.",
+            reply_markup
+        )
+        
+        await update_main_message(
+            partner_id,
+            context,
+            "Собеседник завершил чат\\. Нажмите кнопку ниже, чтобы начать новый поиск\\.",
+            reply_markup
+        )
+        
+        # Update state
         if user_id in self.state.active_chats:
             del self.state.active_chats[user_id]
         if partner_id in self.state.active_chats:
             del self.state.active_chats[partner_id]
         
-        # Remove first message records
-        if user_id in self.state.first_messages:
-            del self.state.first_messages[user_id]
-        if partner_id in self.state.first_messages:
-            del self.state.first_messages[partner_id]
-        
-        # Показываем сообщение только партнёру (пользователь будет перенаправлен на главный экран)
-        end_chat_keyboard = [
-            [InlineKeyboardButton("🏠 Домой", callback_data="home")],
-            [InlineKeyboardButton("🔍 Начать поиск", callback_data="search_chat")],
-            [InlineKeyboardButton("👤 Профиль", callback_data="view_profile")],
-            [InlineKeyboardButton("❓ Поддержка", url="https://t.me/DoxGames_bot")]
-        ]
-        reply_markup = InlineKeyboardMarkup(end_chat_keyboard)
-        
-        await update_main_message(
-            partner_id,
-            context,
-            "❌ *Чат завершен собеседником\\.*\n\n"
-            "Диалог был завершен вашим собеседником\\. Нажмите кнопку *Начать поиск* для поиска нового собеседника\\.",
-            reply_markup
-        )
-        
+        logger.info(f"Ended chat {chat_id} between users {user_id} and {partner_id}")
         return True
     
     async def find_match(self, user_id: int) -> Optional[int]:
@@ -442,23 +458,9 @@ class ChatManager:
         Returns:
             Partner ID if found, None otherwise
         """
-        # Получаем пользователей, ищущих собеседника, из базы данных
+        # Получаем пользователей, ищущих собеседника, из базы данных вместо локального списка
         waiting_users = await db.get_searching_users()
         
-        # Исключаем пользователей, которые уже в чате
-        active_users = set()
-        for uid in waiting_users:
-            if uid in self.state.active_chats or await db.get_active_chat(uid):
-                active_users.add(uid)
-        
-        waiting_users = [uid for uid in waiting_users if uid not in active_users]
-        
-        # Убираем текущего пользователя из списка ожидающих
-        waiting_users = [uid for uid in waiting_users if uid != user_id]
-        
-        if not waiting_users:
-            return None
-            
         # Check if user has a profile for better matching
         has_profile = await db.has_completed_profile(user_id)
         
@@ -471,6 +473,9 @@ class ChatManager:
             max_common_interests = -1
             
             for waiting_user_id in waiting_users:
+                if waiting_user_id == user_id:  # Skip self
+                    continue
+                    
                 # Get waiting user profile and interests
                 waiting_user_has_profile = await db.has_completed_profile(waiting_user_id)
                 
@@ -483,17 +488,17 @@ class ChatManager:
                     
                     if user_profile and waiting_user_profile:
                         # Check if user is looking for specific gender and waiting user fits
-                        if (user_profile.get('looking_for') and 
-                            user_profile['looking_for'].lower() != 'any' and
-                            waiting_user_profile.get('gender') and
-                            user_profile['looking_for'].lower() != waiting_user_profile['gender'].lower()):
+                        if (user_profile['looking_for'] and 
+                            user_profile['looking_for'] != 'any' and
+                            waiting_user_profile['gender'] and
+                            user_profile['looking_for'] != waiting_user_profile['gender']):
                             gender_match = False
                         
                         # Check if waiting user is looking for specific gender and user fits
-                        if (waiting_user_profile.get('looking_for') and 
-                            waiting_user_profile['looking_for'].lower() != 'any' and
-                            user_profile.get('gender') and
-                            waiting_user_profile['looking_for'].lower() != user_profile['gender'].lower()):
+                        if (waiting_user_profile['looking_for'] and 
+                            waiting_user_profile['looking_for'] != 'any' and
+                            user_profile['gender'] and
+                            waiting_user_profile['looking_for'] != user_profile['gender']):
                             gender_match = False
                     
                     if gender_match:
@@ -506,9 +511,12 @@ class ChatManager:
             if best_match:
                 return best_match
         
-        # Если нет подходящих совпадений по профилю или у пользователя нет профиля,
-        # просто берем первого доступного пользователя из списка ожидающих
-        return waiting_users[0]
+        # If no match by interests or no profile, just take the first waiting user
+        for waiting_user_id in waiting_users:
+            if waiting_user_id != user_id:  # Skip self
+                return waiting_user_id
+        
+        return None
 
 # Create a global instance of the BotState class
 state = BotState()
@@ -561,18 +569,18 @@ async def download_media_file(
             "audio": ".mp3",
             "document": ""  # Will be determined from file path
         }
-    
+        
         mime_types = {
             "photo": "image/jpeg",
             "video": "video/mp4",
-                "voice": "audio/ogg",
-        "sticker": "image/webp",
+            "voice": "audio/ogg",
+            "sticker": "image/webp",
             "video_note": "video/mp4",
             "animation": "video/mp4",
-            "audio": "audio/mpeg",
+            "audio": "application/octet-stream",
             "document": "application/octet-stream"  # Default
-    }
-    
+        }
+        
         # Get file from Telegram
         tg_file = await context.bot.get_file(file_id)
         
@@ -654,8 +662,8 @@ async def delete_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Skip message deletion if user is in chat initialization state
     if user_id in state.chat_initialization and state.chat_initialization[user_id]:
-            return
-        
+        return
+    
     # If user has a first message in active chat, protect it from deletion
     protected_message_id = state.first_messages.get(user_id)
     
@@ -663,14 +671,14 @@ async def delete_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> N
     for message_id in state.user_messages[user_id]:
         # Skip protected message
         if protected_message_id and message_id == protected_message_id:
-                continue
+            continue
         message_ids_to_delete.append(message_id)
-                
+    
     for message_id in message_ids_to_delete:
-            try:
-                await context.bot.delete_message(chat_id=user_id, message_id=message_id)
-            except Exception as e:
-                logger.warning(f"Could not delete message {message_id} for user {user_id}: {e}")
+        try:
+            await context.bot.delete_message(chat_id=user_id, message_id=message_id)
+        except Exception as e:
+            logger.warning(f"Could not delete message {message_id} for user {user_id}: {e}")
     
     # Keep only protected message in user_messages
     if protected_message_id:
@@ -687,13 +695,13 @@ async def clear_all_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         context: Telegram bot context
     """
     if user_id not in state.user_messages:
-            return
-            
+        return
+    
     for message_id in state.user_messages[user_id]:
-            try:
-                await context.bot.delete_message(chat_id=user_id, message_id=message_id)
-            except Exception as e:
-                logger.warning(f"Could not delete message {message_id} for user {user_id}: {e}")
+        try:
+            await context.bot.delete_message(chat_id=user_id, message_id=message_id)
+        except Exception as e:
+            logger.warning(f"Could not delete message {message_id} for user {user_id}: {e}")
     
     # Clear all stored messages
     state.user_messages[user_id] = []
@@ -760,7 +768,7 @@ async def update_main_message(
             reply_markup=keyboard,
             parse_mode="MarkdownV2"
         )
-            
+        
         # Store the new message ID
         state.main_message_ids[user_id] = message.message_id
         await db.update_main_message_id(user_id, message.message_id)
@@ -784,12 +792,13 @@ async def home_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user_id = update.effective_user.id
     else:
         return
-
-    # Сбрасываем состояние показа анимации
-    await reset_animation_shown(user_id)
     
-    # Отправляем главное меню с гифкой
-    await send_main_menu_with_animation(user_id, context)
+    # Подготавливаем клавиатуру
+    keyboard = MAIN_MENU_KEYBOARD
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Отправляем главное меню с гифкой через универсальную функцию
+    await send_menu_message(user_id, context, MAIN_MENU_TEXT, reply_markup, is_main_menu=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command handler."""
@@ -813,32 +822,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_new_user:
         # Offer profile setup for first-time users
         keyboard = [
-            [InlineKeyboardButton("🖊 Начать", callback_data="setup_profile")],
-            [InlineKeyboardButton("↩️ Пропустить настройку", callback_data="skip_profile_setup")]
+            [InlineKeyboardButton("Начать", callback_data="setup_profile")],
+            [InlineKeyboardButton("Пропустить настройку", callback_data="skip_profile_setup")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        text = "*👨🏻‍💻 Добро пожаловать в DOX: Анонимный Чат*\n\n" \
-               "📝 Заполните быстро анкету, обычно *это занимает 9 секунд* и на *49%* повышает качество поиска собеседников\\!\n\n" \
+        text = "*Добро пожаловать в DOX: Анонимный Чат*\n\n" \
+               "Заполните быстро анкету, обычно *это занимает 9 секунд* и на *49%* повышает качество поиска собеседников\\!\n\n" \
                "_Вы можете изменить ее в любой момент в настройках\\._"
-
-        if update.callback_query:
-            # If called from callback query (Home button)
-            query = update.callback_query
-            await query.answer()
-            await update_main_message(user_id, context, text, reply_markup)
-        else:
-            # If called from /start command for new user
-            await update_main_message(user_id, context, text, reply_markup)
+               
+        await update_main_message(user_id, context, text, reply_markup)
     else:
-        # Для возвращающихся пользователей показываем главное меню с гифкой
-        if update.callback_query:
-            # If called from callback query (Home button)
-            query = update.callback_query
-            await query.answer()
-        
-        # Отправляем главное меню с гифкой
-        await send_main_menu_with_animation(user_id, context)
+        # For returning users, show main menu with animation
+        keyboard = MAIN_MENU_KEYBOARD
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await send_menu_message(user_id, context, MAIN_MENU_TEXT, reply_markup, is_main_menu=True)
 
 async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -866,14 +864,14 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         keyboard = CHAT_CONTROL_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update_main_message(
+        await send_menu_message(
             user_id,
             context,
             "Вы уже находитесь в активном чате\\. Используйте кнопки ниже для управления чатом\\.",
             reply_markup
         )
         return
-
+    
     # Проверяем статус поиска также из базы данных
     searching_users = await db.get_searching_users()
     is_searching = user_id in searching_users or user_id in state.users_searching
@@ -884,7 +882,7 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         keyboard = SEARCH_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update_main_message(
+        await send_menu_message(
             user_id,
             context,
             "Вы уже ищете собеседника\\. Пожалуйста, подождите\\.\n\nКогда собеседник будет найден, я вам сообщу\\.",
@@ -900,8 +898,8 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Ask user to set up their profile first
         keyboard = PROFILE_SETUP_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update_main_message(
+        
+        await send_menu_message(
             user_id,
             context,
             "🔍 *Поиск собеседника*\n\n"
@@ -928,7 +926,7 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Cancel the search for a chat partner.
-
+    
     This function is triggered when a user clicks the "Cancel Search" button.
     It removes the user from the waiting list and returns them to the main menu.
     """
@@ -1016,17 +1014,17 @@ async def stop_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_markup
         )
     else:
-        # Сбрасываем состояние показа анимации
-        await reset_animation_shown(user_id)
         # Перенаправляем на главный экран с гифкой
-        await send_main_menu_with_animation(user_id, context)
+        keyboard = MAIN_MENU_KEYBOARD
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update_main_message_with_animation(user_id, context, reply_markup)
 
 async def skip_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Skip the current chat and start searching for a new one.
+    Skip the current chat and immediately start searching for a new one.
     
     This function is triggered when a user clicks the "Skip Chat" button.
-    It ends the current chat and immediately starts searching for a new partner.
+    It ends the current chat and automatically starts searching for a new chat partner.
     """
     query = update.callback_query
     if not query or not query.from_user:
@@ -1041,29 +1039,27 @@ async def skip_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not success:
         # If ending chat was not successful, show error message
         reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-        await query.edit_message_text(
-            text="Вы не находитесь в активном чате или произошла ошибка\\.\n\n"
-                 "Нажмите кнопку *Начать поиск* для поиска нового собеседника\\.",
-            reply_markup=reply_markup,
-            parse_mode="MarkdownV2"
+        await update_main_message(
+            user_id,
+            context,
+            "Вы не находитесь в активном чате или произошла ошибка\\.\n\n"
+            "Нажмите кнопку *Начать поиск* для поиска нового собеседника\\.",
+            reply_markup
         )
         return
     
-    # Показываем сообщение о поиске в том же сообщении
-    keyboard = SEARCH_KEYBOARD
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Start searching for a new chat
+    await chat_manager.start_search(user_id, context)
     
-    await query.edit_message_text(
-        text="🔍 *Поиск собеседника*\n\n"
-             "Ищем для вас собеседника\\.\n"
-             "Это может занять некоторое время\\.\n\n"
-             "Когда кто\\-то будет найден, я вам сообщу\\.",
-        reply_markup=reply_markup,
-        parse_mode="MarkdownV2"
+    # Show search message
+    reply_markup = InlineKeyboardMarkup(SEARCH_KEYBOARD)
+    await update_main_message(
+        user_id,
+        context,
+        "Ищем нового собеседника\\.\n\n"
+        "Вы можете отменить поиск в любой момент\\.",
+        reply_markup
     )
-    
-    # Начинаем поиск нового собеседника, пропуская отправку сообщения
-    await chat_manager.start_search(user_id, context, skip_message=True)
 
 class MediaHandler:
     """
@@ -1292,7 +1288,7 @@ class MediaHandler:
             sender_id=self.user_id,
             content=None,
             message_type='video_note',
-            file_id=file_id, 
+            file_id=file_id,
             local_file_path=local_path,
             file_name=unique_id,
             mime_type=mime_type,
@@ -2242,18 +2238,13 @@ async def init_db(application: Application) -> None:
             logger.info("Database synchronization completed successfully")
         except Exception as e:
             logger.error(f"Error synchronizing with database: {e}")
-        
-        # Reset animation_shown state at bot start
-        global animation_shown
-        animation_shown = {}
-        logger.info("Animation shown state reset")
-        
+    
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
 
 async def cleanup_db(application: Application) -> None:
-    """Cleanup database connections."""
+    """Close the database connection."""
     try:
         await db.disconnect()
         logger.info("Database connection closed successfully")
@@ -2261,13 +2252,49 @@ async def cleanup_db(application: Application) -> None:
         logger.error(f"Error closing database connection: {e}")
 
 async def reset_animation_shown(user_id: int) -> None:
-    """Reset the animation shown flag for a user."""
-    state.animation_shown[user_id] = False
+    """
+    Reset the animation_shown flag for a specific user.
+    This will cause the animation to be shown again the next time
+    the main menu is displayed.
+    
+    Args:
+        user_id: Telegram user ID
+    """
+    global animation_shown
+    animation_shown[user_id] = False
+    logger.info(f"Animation shown flag reset for user {user_id}")
 
 # Profile setup handlers
 async def setup_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start profile setup process."""
-    await UserProfileManager.setup_profile(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Set user as being in gender selection state
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_GENDER, 1)
+    
+    # Show gender selection menu
+    buttons = [
+        [
+            InlineKeyboardButton("👨 Мужской", callback_data="gender_male"),
+            InlineKeyboardButton("👩 Женский", callback_data="gender_female")
+        ],
+        [InlineKeyboardButton("🧑 Другой", callback_data="gender_other")]
+    ]
+    
+    keyboard = InlineKeyboardMarkup(buttons)
+    
+    await update_main_message(
+        user_id,
+        context,
+        "*Выберите ваш пол:*\n\n"
+        "Это поможет в поиске подходящего собеседника\\.",
+        keyboard
+    )
 
 async def skip_profile_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Skip profile setup and return to main menu."""
@@ -2282,785 +2309,178 @@ async def skip_profile_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await db.update_profile_setup_state(user_id, PROFILE_SETUP_NONE, 0)
     
     # Show main menu with animation
-    await send_main_menu_with_animation(user_id, context)
+    reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+    await send_menu_message(
+        user_id,
+        context,
+        MAIN_MENU_TEXT,
+        reply_markup,
+        is_main_menu=True
+    )
 
 async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle gender selection in profile setup."""
-    await UserProfileManager.handle_gender_selection(update, context)
-
-async def set_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle looking for selection in profile setup."""
-    await UserProfileManager.handle_looking_for_selection(update, context)
-
-async def handle_age_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle age selection in profile setup."""
-    await UserProfileManager.handle_age_selection(update, context)
-
-async def toggle_interest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle selection of an interest."""
-    await UserProfileManager.toggle_interest(update, context)
-
-async def complete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Complete profile setup."""
-    await UserProfileManager.complete_profile(update, context)
-
-async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View user profile."""
-    await UserProfileManager.view_profile(update, context)
-
-async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit user profile."""
-    await UserProfileManager.edit_profile(update, context)
-
-async def edit_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit gender in profile."""
-    await UserProfileManager.edit_gender(update, context)
-
-async def edit_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit looking for preference in profile."""
-    await UserProfileManager.edit_looking_for(update, context)
-
-async def edit_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit age in profile."""
-    await UserProfileManager.edit_age(update, context)
-
-async def save_age_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Save age edit in profile."""
-    await UserProfileManager.save_age_edit(update, context)
-
-async def edit_interests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit interests in profile."""
-    await UserProfileManager.edit_interests(update, context)
-
-async def save_gender_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Save gender edit in profile."""
-    await UserProfileManager.save_gender_edit(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract gender from callback data
+    gender = query.data.split('_')[2]
+    
+    # Save gender in database
+    await db.save_user_profile(user_id, gender=gender)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
 
 async def save_looking_for_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Save looking for preference edit in profile."""
-    await UserProfileManager.save_looking_for_edit(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract looking for preference from callback data
+    looking_for = query.data.split('_')[2]
+    
+    # Save looking for preference in database
+    await db.save_user_profile(user_id, looking_for=looking_for)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
 
-class UserProfileManager:
+async def handle_rating(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Class to manage user profiles, including setup, editing, and viewing.
+    Handle user rating after a chat ends.
+    
+    Args:
+        update: Telegram update
+        context: Telegram context
     """
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
     
-    @staticmethod
-    async def get_user_profile_text(user_id: int) -> str:
-        """
-        Get a formatted text representation of a user's profile.
-        
-        Args:
-            user_id: The Telegram user ID
-            
-        Returns:
-            Formatted profile text for display
-        """
-        profile = await db.get_user_profile(user_id)
-        interests = await db.get_user_interests(user_id)
-        
-        if not profile:
-            return "Профиль не настроен\\."
-        
-        profile_text = "*👤 Ваш профиль*\n\n"
-        
-        # Gender
-        if profile.get('gender'):
-            gender_text = {
-                'male': "👨 Мужской",
-                'female': "👩 Женский",
-                'other': "🧑 Другой"
-            }.get(profile['gender'], "Не указан")
-            profile_text += f"• *Пол:* {gender_text}\n"
-        else:
-            profile_text += f"• *Пол:* Не указан\n"
-        
-        # Looking for
-        if profile.get('looking_for'):
-            looking_for_text = {
-                'male': "👨 Мужской",
-                'female': "👩 Женский",
-                'any': "👥 Любой"
-            }.get(profile['looking_for'], "Не указано")
-            profile_text += f"• *Ищу:* {looking_for_text}\n"
-        else:
-            profile_text += f"• *Ищу:* Не указано\n"
-        
-        # Age
-        if profile.get('age'):
-            profile_text += f"• *Возраст:* {profile['age']}\n"
-        else:
-            profile_text += f"• *Возраст:* Не указан\n"
-        
-        # Interests
-        if interests:
-            interests_text = "\n".join([f"  • {interest}" for interest in interests])
-            profile_text += f"• *Интересы:*\n{interests_text}"
-        else:
-            profile_text += f"• *Интересы:* Не указаны"
-        
-        return profile_text
+    await query.answer()
+    user_id = query.from_user.id
     
-    @staticmethod
-    async def send_gender_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send gender selection menu to user.
+    # Check if this is a skip rating action
+    if query.data == "skip_rating":
+        # Just show the main menu
+        reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+        await update_main_message(
+            user_id,
+            context,
+            "Главное меню\\. Выберите действие:",
+            reply_markup
+        )
         
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        buttons = [
-            [
-                InlineKeyboardButton("👨 Мужской", callback_data=f"{'gender_edit' if is_edit else 'gender'}_male"),
-                InlineKeyboardButton("👩 Женский", callback_data=f"{'gender_edit' if is_edit else 'gender'}_female")
-            ],
-            [InlineKeyboardButton("🧑 Другой", callback_data=f"{'gender_edit' if is_edit else 'gender'}_other")]
-        ]
+        # Remove from ended chats for rating
+        if user_id in state.ended_chats_for_rating:
+            del state.ended_chats_for_rating[user_id]
         
-        if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
-        
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        text = "*Выберите ваш пол:*\n\n" \
-               "Это поможет в поиске подходящего собеседника\\."
+        return
+    
+    # Get rating type from callback data
+    rating_type = query.data.split('_')[1]  # rate_kiss -> kiss
+    
+    # Check if user has an ended chat for rating
+    if user_id not in state.ended_chats_for_rating:
+        # No chat to rate, show error
+        reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+        await update_main_message(
+            user_id,
+            context,
+            "Нет активного чата для оценки\\. Выберите действие:",
+            reply_markup
+        )
+        return
+    
+    # Get chat ID and partner ID
+    chat_id, partner_id = state.ended_chats_for_rating[user_id]
+    
+    # Save rating in database
+    await db.save_user_rating(chat_id, user_id, partner_id, rating_type)
+    
+    # Show confirmation and main menu
+    reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+    
+    rating_emoji = {
+        "kiss": "💋",
+        "money": "💰",
+        "clown": "🤡"
+    }
+    
+    await update_main_message(
+        user_id,
+        context,
+        f"Вы оценили собеседника: {rating_emoji.get(rating_type, '')}\\.\n\n"
+        "Выберите действие:",
+        reply_markup
+    )
+    
+    # Remove from ended chats for rating
+    del state.ended_chats_for_rating[user_id]
 
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
+async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle user reaction during search after skipping.
     
-    @staticmethod
-    async def send_looking_for_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send looking for preference selection menu to user.
-        
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        buttons = [
-            [
-                InlineKeyboardButton("👨 Мужской", callback_data=f"{'looking_for_edit' if is_edit else 'looking_for'}_male"),
-                InlineKeyboardButton("👩 Женский", callback_data=f"{'looking_for_edit' if is_edit else 'looking_for'}_female")
-            ],
-            [InlineKeyboardButton("👥 Любой", callback_data=f"{'looking_for_edit' if is_edit else 'looking_for'}_any")]
-        ]
-        
-        if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
-        
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        text = "*Кого вы ищете для общения?*\n\n" \
-               "Выберите предпочитаемый пол собеседника\\."
-
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
+    Args:
+        update: Telegram update
+        context: Telegram context
+    """
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
     
-    @staticmethod
-    async def send_age_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send age selection menu to user.
-        
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        # Create age buttons in rows of 5 buttons each
-        buttons = []
-        current_row = []
-        
-        for age in range(18, 51):
-            current_row.append(
-                InlineKeyboardButton(str(age), callback_data=f"{'age_edit' if is_edit else 'age'}_{age}")
-            )
-            
-            if len(current_row) == 5:
-                buttons.append(current_row)
-                current_row = []
-        
-        # Add any remaining buttons
-        if current_row:
-            buttons.append(current_row)
-        
-        # Add 50+ option
-        buttons.append([InlineKeyboardButton("50+", callback_data=f"{'age_edit' if is_edit else 'age'}_50plus")])
-        
-        if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
-        
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        text = "*Укажите ваш возраст:*\n\n" \
-               "Это поможет найти собеседника вашей возрастной группы\\."
-
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
+    await query.answer()
+    user_id = query.from_user.id
     
-    @staticmethod
-    async def send_interests_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send interests selection menu to user.
-        
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        # Get available interests from database
-        all_interests = await db.get_all_interests()
-        user_interests = await db.get_user_interests(user_id)
-        
-        # Create buttons for interests
-        buttons = []
-        
-        for interest in all_interests:
-            interest_name = interest['name']
-            is_selected = interest_name in user_interests
-            
-            # Create button text with checkmark if selected
-            button_text = f"{'✅' if is_selected else '❌'} {interest_name}"
-            
-            # Create button with callback data for toggling
-            buttons.append([InlineKeyboardButton(
-                button_text, 
-                callback_data=f"toggle_interest_{interest_name}"
-            )])
-        
-        # Add buttons for completing or going back
-        if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
-        else:
-            buttons.append([InlineKeyboardButton("✅ Готово", callback_data="complete_profile")])
-        
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        text = "*Выберите ваши интересы:*\n\n" \
-               "Нажмите на интересы, чтобы выбрать их\\. Нажмите повторно, чтобы отменить выбор\\.\n\n" \
-               f"Выбрано: {len(user_interests) if user_interests else 0}"
-
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
+    # Get reaction type from callback data
+    reaction_type = query.data.split('_')[1]  # reaction_kiss -> kiss
     
-    @staticmethod
-    async def setup_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Start the profile setup process.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Set user as being in gender selection state
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_GENDER, 1)
-        
-        # Show gender selection menu
-        await UserProfileManager.send_gender_selection(user_id, context)
+    # Check if user has a recent ended chat
+    if user_id not in state.ended_chats_for_rating:
+        # No chat to rate, just continue searching
+        reply_markup = InlineKeyboardMarkup(SEARCH_WITH_REACTIONS_KEYBOARD)
+        await update_main_message(
+            user_id,
+            context,
+            "Ищем нового собеседника\\.\n\nВы можете оценить предыдущего собеседника или отменить поиск\\.",
+            reply_markup
+        )
+        return
     
-    @staticmethod
-    async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle gender selection in profile setup.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
+    # Get chat ID and partner ID
+    chat_id, partner_id = state.ended_chats_for_rating[user_id]
     
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract gender from callback data
-        gender = query.data.split('_')[1]
-        
-        # Save gender in database
-        await db.save_user_profile(user_id, gender=gender)
-        
-        # Update profile setup state to looking for selection
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_LOOKING_FOR, 2)
-        
-        # Show looking for selection menu
-        await UserProfileManager.send_looking_for_selection(user_id, context)
+    # Save rating in database
+    await db.save_user_rating(chat_id, user_id, partner_id, reaction_type)
     
-    @staticmethod
-    async def handle_looking_for_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle looking for selection in profile setup.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
+    # Show confirmation and continue searching
+    rating_emoji = {
+        "kiss": "💋",
+        "money": "💰",
+        "clown": "🤡"
+    }
     
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract looking for preference from callback data
-        looking_for = query.data.split('_')[1]
-        
-        # Save looking for preference in database
-        await db.save_user_profile(user_id, looking_for=looking_for)
-        
-        # Update profile setup state to age selection
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_AGE, 3)
-        
-        # Show age selection menu
-        await UserProfileManager.send_age_selection(user_id, context)
+    reply_markup = InlineKeyboardMarkup(SEARCH_WITH_REACTIONS_KEYBOARD)
+    await update_main_message(
+        user_id,
+        context,
+        f"Вы оценили собеседника: {rating_emoji.get(reaction_type, '')}\\.\n\n"
+        "Продолжаем поиск нового собеседника\\.",
+        reply_markup
+    )
     
-    @staticmethod
-    async def handle_age_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle age selection in profile setup.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract age from callback data
-        age_data = query.data.split('_')[1]
-        age = 50 if age_data == "50plus" else int(age_data)
-        
-        # Save age in database
-        await db.save_user_profile(user_id, age=age)
-        
-        # Update profile setup state to interests selection
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_INTERESTS, 4)
-        
-        # Show interests selection menu
-        await UserProfileManager.send_interests_selection(user_id, context)
-    
-    @staticmethod
-    async def toggle_interest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Toggle selection of an interest.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract interest name from callback data
-        callback_data = query.data
-        if callback_data.startswith("toggle_interest_"):
-            interest_name = callback_data.replace("toggle_interest_", "")
-        elif callback_data.startswith("interest_"):
-            interest_name = callback_data.replace("interest_", "")
-        else:
-            logger.error(f"Unexpected callback data format: {callback_data}")
-            return
-        
-        # Get current user interests
-        user_interests = await db.get_user_interests(user_id)
-        
-        if interest_name in user_interests:
-            # If already selected, remove it
-            await db.remove_user_interest(user_id, interest_name)
-        else:
-            # If not selected, add it
-            await db.save_user_interest(user_id, interest_name)
-        
-        # Get setup state
-        profile_state, _ = await db.get_profile_setup_state(user_id)
-        is_edit = profile_state != PROFILE_SETUP_INTERESTS
-        
-        # Refresh interests menu
-        await UserProfileManager.send_interests_selection(user_id, context, is_edit, query=query)
-    
-    @staticmethod
-    async def complete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Complete the profile setup process.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Mark profile setup as complete
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_COMPLETE, 5)
-        
-        # Отправляем главное меню с гифкой
-        await send_main_menu_with_animation(user_id, context)
-    
-    @staticmethod
-    async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        View user profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = None
-        if update.callback_query:
-            query = update.callback_query
-            await query.answer()
-            user_id = query.from_user.id
-        elif update.message:
-            user_id = update.message.from_user.id
-        else:
-            return
-
-        # Get user profile for display
-        profile_text = await UserProfileManager.get_user_profile_text(user_id)
-    
-        # Create keyboard for profile actions
-        keyboard = [
-            [InlineKeyboardButton("✏️ Редактировать профиль", callback_data="edit_profile")],
-            [InlineKeyboardButton("🔍 Начать поиск", callback_data="search_chat")],
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="home")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-    
-        # Show profile
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=profile_text,
-                    reply_markup=reply_markup,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    # Если сообщение содержит анимацию, редактируем caption
-                    await query.edit_message_caption(
-                        caption=profile_text,
-                        reply_markup=reply_markup,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                profile_text,
-                reply_markup
-            )
-    
-    @staticmethod
-    async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Show profile edit menu.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-
-        await query.answer()
-        user_id = query.from_user.id
-    
-        # Create keyboard for profile edit options
-        keyboard = [
-            [InlineKeyboardButton("👤 Изменить пол", callback_data="edit_gender")],
-            [InlineKeyboardButton("🔍 Изменить предпочтения", callback_data="edit_looking_for")],
-            [InlineKeyboardButton("🔢 Изменить возраст", callback_data="edit_age")],
-            [InlineKeyboardButton("🏷️ Изменить интересы", callback_data="edit_interests")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="view_profile")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-    
-        # Show edit options
-        try:
-            await query.edit_message_text(
-                text="*Редактирование профиля*\n\n"
-                     "Выберите, что вы хотите изменить в вашем профиле:",
-                reply_markup=reply_markup,
-                parse_mode="MarkdownV2"
-            )
-        except telegram.error.BadRequest as e:
-            if "There is no text in the message to edit" in str(e):
-                # Если сообщение содержит анимацию, редактируем caption
-                await query.edit_message_caption(
-                    caption="*Редактирование профиля*\n\n"
-                           "Выберите, что вы хотите изменить в вашем профиле:",
-                    reply_markup=reply_markup,
-                    parse_mode="MarkdownV2"
-                )
-            else:
-                raise
-    
-    @staticmethod
-    async def edit_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit gender in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Show gender selection menu in edit mode
-        await UserProfileManager.send_gender_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def edit_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit looking for preference in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Show looking for selection menu in edit mode
-        await UserProfileManager.send_looking_for_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def edit_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit age in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Show age selection menu in edit mode
-        await UserProfileManager.send_age_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def edit_interests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit interests in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-    
-        await query.answer()
-        user_id = query.from_user.id
-
-        # Show interests selection menu in edit mode
-        await UserProfileManager.send_interests_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def save_gender_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Save gender edit in profile.
-
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-    
-    # Extract gender from callback data
-        gender = query.data.split('_')[2]
-    
-        # Save gender in database
-        await db.save_user_profile(user_id, gender=gender)
-    
-        # Return to profile edit menu
-        await UserProfileManager.edit_profile(update, context)
-    
-    @staticmethod
-    async def save_looking_for_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Save looking for preference edit in profile.
-
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-    
-        await query.answer()
-        user_id = query.from_user.id
-    
-        # Extract looking for preference from callback data
-        looking_for = query.data.split('_')[2]
-        
-        # Save looking for preference in database
-        await db.save_user_profile(user_id, looking_for=looking_for)
-    
-        # Return to profile edit menu
-        await UserProfileManager.edit_profile(update, context)
-    
-    @staticmethod
-    async def save_age_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Save age edit in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract age from callback data
-        age_data = query.data.split('_')[2]
-        age = 50 if age_data == "50plus" else int(age_data)
-        
-        # Save age in database
-        await db.save_user_profile(user_id, age=age)
-        
-        # Return to profile edit menu
-        await UserProfileManager.edit_profile(update, context)
-
-# Словарь для отслеживания, была ли показана гифка пользователю
-animation_shown = {}
+    # Remove from ended chats for rating
+    del state.ended_chats_for_rating[user_id]
 
 async def send_main_menu_with_animation(
     user_id: int, 
@@ -3068,76 +2488,222 @@ async def send_main_menu_with_animation(
 ) -> None:
     """
     Send animation and main menu message for a user.
-    The animation is shown only once per session, while the menu message
-    is created for editing in subsequent interactions.
+    Now just a wrapper around update_main_message_with_animation.
     
     Args:
         user_id: Telegram user ID
         context: Telegram bot context
     """
+    keyboard = MAIN_MENU_KEYBOARD
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update_main_message_with_animation(user_id, context, reply_markup)
+
+async def update_main_message_with_animation(
+    user_id: int, 
+    context: ContextTypes.DEFAULT_TYPE, 
+    keyboard: Optional[InlineKeyboardMarkup] = None
+) -> None:
+    """
+    Update or send the main menu message with animation for a user.
+    
+    Args:
+        user_id: Telegram user ID
+        context: Telegram bot context
+        keyboard: Optional inline keyboard
+    """
     try:
-        # Создаем клавиатуру
-        keyboard = MAIN_MENU_KEYBOARD
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # URL гифки 
+        animation_url = "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbTB1ZWRwaGpiNW1vd3dpdzZoNnBweTRqYWNsODlmaHE4M2l0aXRndCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/gdcnaVs40BdrmV62g8/giphy.gif"
         
-        # Очищаем предыдущие сообщения
-        await delete_messages(user_id, context)
+        # Get message_id from database first
+        message_id = await db.get_main_message_id(user_id)
         
-        # Проверяем, показывали ли мы анимацию этому пользователю
-        if user_id not in state.animation_shown or not state.animation_shown[user_id]:
-            # URL гифки
+        # If not in database, check memory cache
+        if message_id is None and user_id in state.main_message_ids:
+            message_id = state.main_message_ids[user_id]
+        
+        # If message ID exists, try to delete the old message and create a new one
+        # (since we can't edit a text message to animation or vice versa)
+        if message_id:
+            try:
+                await context.bot.delete_message(chat_id=user_id, message_id=message_id)
+            except Exception as e:
+                logger.warning(f"Could not delete old main message for user {user_id}: {e}")
+        
+        # Send a new animation message
+        message = await context.bot.send_animation(
+            chat_id=user_id,
+            animation=animation_url,
+            caption=MAIN_MENU_TEXT,
+            reply_markup=keyboard,
+            parse_mode="MarkdownV2"
+        )
+        
+        # Store the new message ID
+        state.main_message_ids[user_id] = message.message_id
+        await db.update_main_message_id(user_id, message.message_id)
+        
+        # Add to user messages
+        if user_id not in state.user_messages:
+            state.user_messages[user_id] = []
+        state.user_messages[user_id].append(message.message_id)
+    
+    except Exception as e:
+        logger.error(f"Error updating main message with animation for user {user_id}: {e}")
+        # Fall back to regular text message
+        await update_main_message(user_id, context, MAIN_MENU_TEXT, keyboard)
+
+async def send_menu_message(
+    user_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    keyboard: Optional[InlineKeyboardMarkup] = None,
+    is_main_menu: bool = False
+) -> None:
+    """
+    Universal function to send or update menu messages while managing message IDs.
+    
+    Args:
+        user_id: Telegram user ID
+        context: Telegram bot context
+        text: Message text
+        keyboard: Optional inline keyboard
+        is_main_menu: If True, will send message with animation (for main menu)
+    """
+    try:
+        # Get message_id from database first
+        message_id = await db.get_main_message_id(user_id)
+        
+        # If not in database, check memory cache
+        if message_id is None and user_id in state.main_message_ids:
+            message_id = state.main_message_ids[user_id]
+        
+        # If message ID exists, try to delete it (we can't edit between text and animation)
+        if message_id:
+            try:
+                await context.bot.delete_message(chat_id=user_id, message_id=message_id)
+            except Exception as e:
+                logger.warning(f"Could not delete old message for user {user_id}: {e}")
+        
+        # Send new message (with animation for main menu, text otherwise)
+        if is_main_menu:
+            # URL гифки 
             animation_url = "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbTB1ZWRwaGpiNW1vd3dpdzZoNnBweTRqYWNsODlmaHE4M2l0aXRndCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/gdcnaVs40BdrmV62g8/giphy.gif"
             
-            # Отправляем анимацию с текстом меню
             message = await context.bot.send_animation(
                 chat_id=user_id,
                 animation=animation_url,
-                caption=MAIN_MENU_TEXT,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                caption=text,
+                reply_markup=keyboard,
+                parse_mode="MarkdownV2"
             )
-            
-            # Помечаем, что анимация показана
-            state.animation_shown[user_id] = True
-            
-            # Сохраняем ID сообщения с анимацией как главное сообщение
-            state.main_message_ids[user_id] = message.message_id
-            await db.update_main_message_id(user_id, message.message_id)
-            
-            # Добавляем в список сообщений пользователя
-            if user_id not in state.user_messages:
-                state.user_messages[user_id] = []
-            state.user_messages[user_id].append(message.message_id)
         else:
-            # Если анимация уже была показана, просто отправляем текстовое сообщение с меню
-            await update_main_message(
-                user_id,
-                context,
-                MAIN_MENU_TEXT,
-                reply_markup
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="MarkdownV2"
             )
+        
+        # Store the new message ID
+        state.main_message_ids[user_id] = message.message_id
+        await db.update_main_message_id(user_id, message.message_id)
+        
+        # Add to user messages
+        if user_id not in state.user_messages:
+            state.user_messages[user_id] = []
+        state.user_messages[user_id].append(message.message_id)
+        
     except Exception as e:
-        logger.error(f"Error sending main menu with animation: {e}")
+        logger.error(f"Error sending menu message for user {user_id}: {e}")
+        # Fall back to regular text message if everything else fails
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="MarkdownV2"
+            )
+        except Exception as inner_e:
+            logger.error(f"Emergency fallback failed for user {user_id}: {inner_e}")
 
-def main() -> None:
+async def save_age_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save age edit in profile."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract age from callback data
+    age_data = query.data.split('_')[2]
+    age = 50 if age_data == "50plus" else int(age_data)
+    
+    # Save age in database
+    await db.save_user_profile(user_id, age=age)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
+
+async def save_gender_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save gender edit in profile."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract gender from callback data
+    gender = query.data.split('_')[2]
+    
+    # Save gender in database
+    await db.save_user_profile(user_id, gender=gender)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
+
+async def set_interests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle interests selection in profile setup."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract interests from callback data
+    interests = query.data.split('_')[2:]
+    
+    # Save interests in database
+    await db.save_user_interests(user_id, interests)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
+
+async def set_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle looking for preference selection in profile setup."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract looking for preference from callback data
+    looking_for = query.data.split('_')[2]
+    
+    # Save looking for preference in database
+    await db.save_user_profile(user_id, looking_for=looking_for)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
+
+def main():
     """Start the bot."""
-    # Parse environment variables
-    bot_token = os.getenv("BOT_TOKEN")
-    database_url = os.getenv("DATABASE_URL")
-    
-    if not bot_token:
-        logger.error("Bot token not found in environment variables")
-        return
-    
-    if not database_url:
-        logger.error("Database URL not found in environment variables")
-        return
-    
-    # Create the Application and pass it the bot's token
-    application = Application.builder().token(bot_token).build()
-
-    # Connect to the database
-    asyncio.get_event_loop().run_until_complete(db.connect(database_url))
+    # Initialize the application
+    application = Application.builder().token(TOKEN).build()
     
     # Register command handlers
     application.add_handler(CommandHandler("start", start))
@@ -3150,36 +2716,23 @@ def main() -> None:
     application.add_handler(CommandHandler("resend_media", resend_media))
     application.add_handler(CommandHandler("toggle_storage", toggle_storage_mode))
     application.add_handler(CommandHandler("import_media", import_media_to_db))
-    application.add_handler(CommandHandler("profile", view_profile))
     
-    # Register callback query handlers
-    application.add_handler(CallbackQueryHandler(search_chat, pattern="^search_chat$"))
-    application.add_handler(CallbackQueryHandler(cancel_search, pattern="^cancel_search$"))
-    application.add_handler(CallbackQueryHandler(stop_chat_new, pattern="^stop_chat$"))
-    application.add_handler(CallbackQueryHandler(skip_chat_new, pattern="^skip_chat$"))
-    application.add_handler(CallbackQueryHandler(start, pattern="^start$"))  # Добавляем обработчик для кнопки "Главное меню"
-    application.add_handler(CallbackQueryHandler(home_command, pattern="^home$"))  # Добавляем обработчик для кнопки "Главное меню" в профиле
-    
-    # Register profile setup handlers
-    application.add_handler(CallbackQueryHandler(setup_profile, pattern="^setup_profile$"))
-    application.add_handler(CallbackQueryHandler(skip_profile_setup, pattern="^skip_profile_setup$"))
-    application.add_handler(CallbackQueryHandler(set_gender, pattern="^gender_(?!edit_)"))
-    application.add_handler(CallbackQueryHandler(set_looking_for, pattern="^looking_for_(?!edit_)"))
-    application.add_handler(CallbackQueryHandler(handle_age_selection, pattern="^age_(?!edit_)"))
-    application.add_handler(CallbackQueryHandler(toggle_interest, pattern="^toggle_interest_"))
-    application.add_handler(CallbackQueryHandler(toggle_interest, pattern="^interest_"))
-    application.add_handler(CallbackQueryHandler(complete_profile, pattern="^complete_profile$"))
+    # Register callback handlers
     application.add_handler(CallbackQueryHandler(view_profile, pattern="^view_profile$"))
     application.add_handler(CallbackQueryHandler(edit_profile, pattern="^edit_profile$"))
-    application.add_handler(CallbackQueryHandler(edit_gender, pattern="^edit_gender$"))
-    application.add_handler(CallbackQueryHandler(edit_looking_for, pattern="^edit_looking_for$"))
-    application.add_handler(CallbackQueryHandler(edit_age, pattern="^edit_age$"))
-    application.add_handler(CallbackQueryHandler(edit_interests, pattern="^edit_interests$"))
-    
-    # Register new handlers for saving profile edits
+    application.add_handler(CallbackQueryHandler(setup_profile, pattern="^setup_profile$"))
+    application.add_handler(CallbackQueryHandler(skip_profile_setup, pattern="^skip_profile_setup$"))
+    application.add_handler(CallbackQueryHandler(set_gender, pattern="^gender_"))
+    application.add_handler(CallbackQueryHandler(set_looking_for, pattern="^looking_for_"))
+    application.add_handler(CallbackQueryHandler(set_age, pattern="^age_"))
+    application.add_handler(CallbackQueryHandler(set_interests, pattern="^interests_"))
     application.add_handler(CallbackQueryHandler(save_gender_edit, pattern="^gender_edit_"))
     application.add_handler(CallbackQueryHandler(save_looking_for_edit, pattern="^looking_for_edit_"))
     application.add_handler(CallbackQueryHandler(save_age_edit, pattern="^age_edit_"))
+    application.add_handler(CallbackQueryHandler(edit_profile, pattern="^edit_gender$"))
+    application.add_handler(CallbackQueryHandler(edit_profile, pattern="^edit_looking_for$"))
+    application.add_handler(CallbackQueryHandler(edit_profile, pattern="^edit_age$"))
+    application.add_handler(CallbackQueryHandler(edit_profile, pattern="^edit_interests$"))
     
     # Register handler for service messages (should be before general message handler)
     application.add_handler(MessageHandler(
@@ -3207,7 +2760,202 @@ def main() -> None:
     application.post_shutdown = cleanup_db
 
     # Run the bot until the user presses Ctrl-C
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Create and set event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Delete webhook before starting polling
+        loop.run_until_complete(application.bot.delete_webhook(drop_pending_updates=True))
+        
+        # Start the bot
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Error running bot: {e}")
+        # Try to clean up any existing webhook
+        try:
+            loop.run_until_complete(application.bot.delete_webhook(drop_pending_updates=True))
+        except:
+            pass
+        raise
+    finally:
+        # Clean up the event loop
+        loop.close()
+
+async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View user profile."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Get user profile from database
+    profile = await db.get_user_profile(user_id)
+    interests = await db.get_user_interests(user_id)
+    
+    if not profile:
+        # If no profile exists, show setup options
+        keyboard = [
+            [InlineKeyboardButton("Настроить профиль", callback_data="setup_profile")],
+            [InlineKeyboardButton("Назад", callback_data="home")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update_main_message(
+            user_id,
+            context,
+            "У вас пока нет профиля\\. Нажмите кнопку ниже, чтобы настроить его\\.",
+            reply_markup
+        )
+        return
+    
+    # Format profile information
+    profile_text = "*👤 Ваш профиль:*\n\n"
+    
+    # Gender
+    if profile.get('gender'):
+        gender_text = {
+            'male': "👨 Мужской",
+            'female': "👩 Женский",
+            'other': "🧑 Другой"
+        }.get(profile['gender'], "Не указан")
+        profile_text += f"• *Пол:* {gender_text}\n"
+    
+    # Age
+    if profile.get('age'):
+        profile_text += f"• *Возраст:* {profile['age']}\n"
+        
+    # Looking for
+    if profile.get('looking_for'):
+        looking_for_text = {
+            'male': "👨 Мужской",
+            'female': "👩 Женский",
+            'any': "👥 Любой"
+        }.get(profile['looking_for'], "Не указано")
+        profile_text += f"• *Ищет:* {looking_for_text}\n"
+    
+    # Interests
+    if interests:
+        # Экранируем специальные символы для MarkdownV2
+        escaped_interests = [interest.replace('.', '\\.').replace('-', '\\-').replace('!', '\\!').replace('(', '\\(').replace(')', '\\)') for interest in interests]
+        profile_text += f"• *Интересы:* {', '.join(escaped_interests)}"
+    
+    # Add edit button
+    keyboard = [
+        [InlineKeyboardButton("✏️ Редактировать профиль", callback_data="edit_profile")],
+        [InlineKeyboardButton("Назад", callback_data="home")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update_main_message(user_id, context, profile_text, reply_markup)
+
+async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show profile edit menu."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Get user profile from database
+    profile = await db.get_user_profile(user_id)
+    
+    # Create edit menu buttons
+    buttons = [
+        [
+            InlineKeyboardButton("👤 Пол", callback_data="edit_gender"),
+            InlineKeyboardButton("🎯 Ищу", callback_data="edit_looking_for")
+        ],
+        [
+            InlineKeyboardButton("📅 Возраст", callback_data="edit_age"),
+            InlineKeyboardButton("🎨 Интересы", callback_data="edit_interests")
+        ],
+        [InlineKeyboardButton("Назад", callback_data="view_profile")]
+    ]
+    
+    keyboard = InlineKeyboardMarkup(buttons)
+    
+    # Format current profile information
+    profile_text = "*✏️ Редактирование профиля:*\n\n"
+    
+    # Gender
+    if profile and profile.get('gender'):
+        gender_text = {
+            'male': "👨 Мужской",
+            'female': "👩 Женский",
+            'other': "🧑 Другой"
+        }.get(profile['gender'], "Не указан")
+        profile_text += f"• *Пол:* {gender_text}\n"
+    else:
+        profile_text += "• *Пол:* Не указан\n"
+    
+    # Age
+    if profile and profile.get('age'):
+        profile_text += f"• *Возраст:* {profile['age']}\n"
+    else:
+        profile_text += "• *Возраст:* Не указан\n"
+        
+    # Looking for
+    if profile and profile.get('looking_for'):
+        looking_for_text = {
+            'male': "👨 Мужской",
+            'female': "👩 Женский",
+            'any': "👥 Любой"
+        }.get(profile['looking_for'], "Не указано")
+        profile_text += f"• *Ищет:* {looking_for_text}\n"
+    else:
+        profile_text += "• *Ищет:* Не указано\n"
+    
+    # Interests
+    interests = await db.get_user_interests(user_id)
+    if interests:
+        # Экранируем специальные символы для MarkdownV2
+        escaped_interests = [interest.replace('.', '\\.').replace('-', '\\-').replace('!', '\\!').replace('(', '\\(').replace(')', '\\)') for interest in interests]
+        profile_text += f"• *Интересы:* {', '.join(escaped_interests)}"
+    else:
+        profile_text += "• *Интересы:* Не указаны"
+    
+    await update_main_message(user_id, context, profile_text, keyboard)
+
+async def set_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle looking for preference selection in profile setup."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract looking for preference from callback data
+    looking_for = query.data.split('_')[2]
+    
+    # Save looking for preference in database
+    await db.save_user_profile(user_id, looking_for=looking_for)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
+
+async def set_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save age edit in profile."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract age from callback data
+    age_data = query.data.split('_')[2]
+    age = 50 if age_data == "50plus" else int(age_data)
+    
+    # Save age in database
+    await db.save_user_profile(user_id, age=age)
+    
+    # Return to profile edit menu
+    await edit_profile(update, context)
 
 if __name__ == "__main__":
-        main()
+    main()

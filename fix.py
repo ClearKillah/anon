@@ -1,0 +1,1 @@
+import re; f=open("bot.py","r"); lines=f.readlines(); f.close(); for i in range(437,550): if "mime_types" in lines[i] and not re.match(r"^\s+mime_types", lines[i]): lines[i] = "        " + lines[i].lstrip(); f=open("bot.py","w"); f.writelines(lines); f.close(); print("Fixed")
