@@ -251,7 +251,7 @@ class ChatManager:
                     await context.bot.edit_message_caption(
                         chat_id=user_id,
                         message_id=user_message_id,
-                        caption=chat_started_text,
+                        text=chat_started_text,
                         parse_mode="MarkdownV2",
                         reply_markup=reply_markup
                     )
@@ -282,7 +282,6 @@ class ChatManager:
                         parse_mode="MarkdownV2",
                         reply_markup=reply_markup
                     )
-                    self.state.main_message_ids[user_id] = message.message_id
             except Exception as e:
                 logger.error(f"Error editing message for user {user_id}: {e}")
                 # Отправляем новое сообщение, если не удалось изменить существующее
@@ -292,7 +291,6 @@ class ChatManager:
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup
                 )
-                self.state.main_message_ids[user_id] = message.message_id
             
             # Второй текст для сообщения партнеру
             chat_started_text = (
@@ -337,7 +335,7 @@ class ChatManager:
                     await context.bot.edit_message_caption(
                         chat_id=partner_id,
                         message_id=partner_message_id,
-                        caption=chat_started_text,
+                        text=chat_started_text,
                         parse_mode="MarkdownV2",
                         reply_markup=reply_markup
                     )
@@ -820,7 +818,7 @@ async def update_main_message(
                 )
                 
                 # Make sure we store this message ID
-                state.main_message_ids[user_id] = message.message_id
+                
                 await db.update_main_message_id(user_id, message.message_id)
                 
                 # Add to user messages if not already there
@@ -849,7 +847,7 @@ async def update_main_message(
         )
             
         # Store the new message ID
-        state.main_message_ids[user_id] = message.message_id
+        
         await db.update_main_message_id(user_id, message.message_id)
         
         # Add to user messages
@@ -958,16 +956,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message_to_delete.delete()
         
         # Отправляем новое сообщение с анимацией
-        message = await context.bot.send_animation(
+        message = await context.bot.send_message(
             chat_id=user_id,
-            animation=ONBOARDING_GIF,
-            caption=ONBOARDING_TEXT,
+            
+            text=ONBOARDING_TEXT,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
         
         # Сохраняем ID сообщения
-        state.main_message_ids[user_id] = message.message_id
+        
     except Exception as e:
         logger.error(f"Error handling start command: {e}")
         # В случае ошибки отправляем текстовое сообщение
@@ -978,7 +976,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
-            state.main_message_ids[user_id] = message.message_id
+            
         except Exception as e:
             logger.error(f"Error sending fallback message: {e}")
 
@@ -1006,12 +1004,9 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         try:
-            await query.edit_message_media(
-                media=InputMediaAnimation(
-                    media=MAIN_MENU_GIF,
-                    caption="Вы уже находитесь в активном чате\\. Используйте кнопки ниже для управления чатом\\.",
-                    parse_mode="MarkdownV2"
-                ),
+            await query.edit_message_text(
+                text="Вы уже находитесь в активном чате\\. Используйте кнопки ниже для управления чатом\\.",
+                parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
             
@@ -1028,25 +1023,21 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     # Check if user is already searching
     if is_searching:
-        # Update main message with search controls
+        # Update main message with cancel search controls
         keyboard = SEARCH_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         try:
-            await query.edit_message_media(
-                media=InputMediaAnimation(
-                    media=MAIN_MENU_GIF,
-                    caption="Вы уже ищете собеседника\\. Пожалуйста, подождите\\.\n\nКогда собеседник будет найден, я вам сообщу\\.",
-                    parse_mode="MarkdownV2"
-                ),
+            await query.edit_message_text(
+                text="Вы уже ищете собеседника\\. Пожалуйста, подождите\\.\n\nКогда собеседник будет найден, я вам сообщу\\.",
+                parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
             
             # Save message ID in state
             state.main_message_ids[user_id] = query.message.message_id
-        except Exception as e:
-            logger.error(f"Error editing message: {e}")
-            
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
         return
     
     # Try to find a match for this user
@@ -1074,15 +1065,14 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         try:
-            await query.edit_message_media(
-                media=InputMediaAnimation(
-                    media=MAIN_MENU_GIF,
-                    caption="🔍 *Поиск собеседника*\n\n"
+            await query.edit_message_text(
+                chat_id=user_id,
+                message_id=query.message.message_id,
+                text="🔍 *Поиск собеседника*\n\n"
                     "Ищем для вас собеседника\\.\n"
                     "Это может занять некоторое время\\.\n\n"
                     "Когда кто\\-то будет найден, я вам сообщу\\.",
-                    parse_mode="MarkdownV2"
-                ),
+                parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
             
@@ -1116,12 +1106,11 @@ async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     try:
-        await query.edit_message_media(
-            media=InputMediaAnimation(
-                media=MAIN_MENU_GIF,
-                caption=MAIN_MENU_TEXT,
-                parse_mode="MarkdownV2"
-            ),
+        await query.edit_message_text(
+            chat_id=user_id,
+            message_id=query.message.message_id,
+            text=MAIN_MENU_TEXT,
+            parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
         # Save message ID in state
@@ -1276,15 +1265,15 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     try:
-        message = await context.bot.send_animation(
+        message = await context.bot.send_message(
             chat_id=user_id,
-            animation=MAIN_MENU_GIF,
-            caption=MAIN_MENU_TEXT,
+            
+            text=MAIN_MENU_TEXT,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
         # Save message ID in state
-        state.main_message_ids[user_id] = message.message_id
+        
     except Exception as e:
         logger.error(f"Error sending animation: {e}")
         # В случае ошибки отправляем текстовое сообщение
@@ -1294,7 +1283,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
-        state.main_message_ids[user_id] = message.message_id
+        
 
 async def skip_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle skip chat button press."""
@@ -1373,32 +1362,32 @@ async def skip_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         else:
             # Если закрепленного сообщения нет, отправляем новое
-            message = await context.bot.send_animation(
+            message = await context.bot.send_message(
                 chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption="🔍 *Поиск нового собеседника*\n\n"
+                
+                text="🔍 *Поиск нового собеседника*\n\n"
                      "Ищем для вас нового собеседника\\.\n"
                      "Обычно это занимает несколько минут\\.\n\n"
                      "Когда кто\\-то будет найден, я вам сообщу\\.",
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
-            state.main_message_ids[user_id] = message.message_id
+            
     except Exception as e:
         logger.error(f"Error updating message: {e}")
         # В случае ошибки отправляем новое сообщение
         try:
-            message = await context.bot.send_animation(
+            message = await context.bot.send_message(
                 chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption="🔍 *Поиск нового собеседника*\n\n"
+                
+                text="🔍 *Поиск нового собеседника*\n\n"
                      "Ищем для вас нового собеседника\\.\n"
                      "Обычно это занимает несколько минут\\.\n\n"
                      "Когда кто\\-то будет найден, я вам сообщу\\.",
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
-            state.main_message_ids[user_id] = message.message_id
+            
         except Exception as e2:
             logger.error(f"Error sending fallback message: {e2}")
             return
@@ -1521,26 +1510,26 @@ async def stop_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         else:
             # Если закрепленного сообщения нет, отправляем новое
-            message = await context.bot.send_animation(
+            message = await context.bot.send_message(
                 chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption=MAIN_MENU_TEXT,
+                
+                text=MAIN_MENU_TEXT,
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
-            state.main_message_ids[user_id] = message.message_id
+            
     except Exception as e:
         logger.error(f"Error updating message: {e}")
         # В случае ошибки отправляем новое сообщение
         try:
-            message = await context.bot.send_animation(
+            message = await context.bot.send_message(
                 chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption=MAIN_MENU_TEXT,
+                
+                text=MAIN_MENU_TEXT,
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
-            state.main_message_ids[user_id] = message.message_id
+            
         except Exception as e:
             logger.error(f"Error sending fallback message: {e}")
 
@@ -1753,13 +1742,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             sent_message = await context.bot.send_photo(
                 chat_id=partner_id,
                 photo=file_id,
-                caption=message.caption
+                text=message.caption
             )
         elif message_type == "video":
             sent_message = await context.bot.send_video(
                 chat_id=partner_id,
                 video=file_id,
-                caption=message.caption
+                text=message.caption
             )
         elif message_type == "voice":
             sent_message = await context.bot.send_voice(
@@ -1846,6 +1835,7 @@ async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             
             # Сохраняем ID нового сообщения
             state.main_message_ids[user_id] = message.message_id
+            
         except Exception as e:
             logger.error(f"Error sending profile message: {e}")
     else:
@@ -1857,7 +1847,7 @@ async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup
             )
-            state.main_message_ids[user_id] = message.message_id
+            
         except Exception as e:
             logger.error(f"Error sending profile message: {e}")
 
@@ -1900,16 +1890,16 @@ async def skip_profile_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.delete()
         
         # Отправляем новое сообщение с главным меню и GIF
-        message = await context.bot.send_animation(
+        message = await context.bot.send_message(
             chat_id=user_id,
-            animation=MAIN_MENU_GIF,
-            caption=MAIN_MENU_TEXT,
+            
+            text=MAIN_MENU_TEXT,
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
         )
         
         # Сохраняем ID сообщения
-        state.main_message_ids[user_id] = message.message_id
+        
     except Exception as e:
         logger.error(f"Error in skip_profile_setup: {e}")
         # В случае ошибки отправляем текстовое сообщение
@@ -1920,7 +1910,7 @@ async def skip_profile_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
             )
-            state.main_message_ids[user_id] = message.message_id
+            
         except Exception as e2:
             logger.error(f"Error sending fallback main menu: {e2}")
 
@@ -2041,16 +2031,16 @@ async def complete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.message.delete()
         
         # Отправляем новое сообщение с главным меню и GIF
-        message = await context.bot.send_animation(
+        message = await context.bot.send_message(
             chat_id=user_id,
-            animation=MAIN_MENU_GIF,
-            caption=MAIN_MENU_TEXT,
+            
+            text=MAIN_MENU_TEXT,
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
         )
         
         # Сохраняем ID сообщения
-        state.main_message_ids[user_id] = message.message_id
+        
     except Exception as e:
         logger.error(f"Error sending main menu after profile completion: {e}")
         # В случае ошибки отправляем текстовое сообщение
@@ -2061,7 +2051,7 @@ async def complete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
             )
-            state.main_message_ids[user_id] = message.message_id
+            
         except Exception as e2:
             logger.error(f"Error sending fallback main menu: {e2}")
 
@@ -2097,11 +2087,11 @@ async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             chat_id=user_id,
             text=text,
             parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+            reply_markup=reply_markup)
         
         # Сохраняем ID нового сообщения
         state.main_message_ids[user_id] = message.message_id
+        
     except Exception as e:
         logger.error(f"Error sending edit profile message: {e}")
         # В случае ошибки пробуем редактировать существующее сообщение
@@ -2447,7 +2437,7 @@ class UserProfileManager:
                         reply_markup=reply_markup
                     )
                     # Save message ID in state
-                    state.main_message_ids[user_id] = message.message_id
+                    
             except Exception as e:
                 logger.error(f"Error sending gender selection message: {e}")
                 # Fallback to edit the message
@@ -2469,7 +2459,7 @@ class UserProfileManager:
                     reply_markup=reply_markup
                 )
                 # Save message ID in state
-                state.main_message_ids[user_id] = message.message_id
+                
             except Exception as e:
                 logger.error(f"Error sending gender selection message: {e}")
     
@@ -2519,7 +2509,7 @@ class UserProfileManager:
                         reply_markup=reply_markup
                     )
                     # Save message ID in state
-                    state.main_message_ids[user_id] = message.message_id
+                    
             except Exception as e:
                 logger.error(f"Error sending looking_for selection message: {e}")
                 # Fallback to edit the message
@@ -2541,7 +2531,7 @@ class UserProfileManager:
                     reply_markup=reply_markup
                 )
                 # Save message ID in state
-                state.main_message_ids[user_id] = message.message_id
+                
             except Exception as e:
                 logger.error(f"Error sending looking_for selection message: {e}")
     
@@ -2627,7 +2617,7 @@ class UserProfileManager:
                     reply_markup=reply_markup
                 )
                 # Save message ID in state
-                state.main_message_ids[user_id] = message.message_id
+                
             except Exception as e:
                 logger.error(f"Error sending age selection message: {e}")
     
@@ -2701,7 +2691,7 @@ class UserProfileManager:
                         reply_markup=reply_markup
                     )
                     # Save message ID in state
-                    state.main_message_ids[user_id] = message.message_id
+                    
             except Exception as e:
                 logger.error(f"Error sending interests selection message: {e}")
                 # Try to edit the message instead
@@ -2723,7 +2713,7 @@ class UserProfileManager:
                     reply_markup=reply_markup
                 )
                 # Save message ID in state
-                state.main_message_ids[user_id] = message.message_id
+                
             except Exception as e:
                 logger.error(f"Error sending interests selection message: {e}")
 
@@ -2835,4 +2825,4 @@ def main() -> None:
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-        main()
+    main()

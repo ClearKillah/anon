@@ -7,7 +7,7 @@ import uuid
 import pathlib
 from typing import Dict, Optional, Set, List, Tuple, Union, Any, cast
 import telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaAnimation, InputMediaPhoto
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -34,6 +34,12 @@ MAIN_MENU_TEXT = "*👨🏻‍💻 DOX: Анонимный Чат*\n\n" \
                  "• Полностью бесплатно;\n" \
                  "• 102% анонимности;\n" \
                  "• После окончания диалога, чат сразу удаляется\\."
+
+ONBOARDING_TEXT = "*👨🏻‍💻 Добро пожаловать в DOX: Анонимный Чат*\n\n📝 Заполните быстро анкету, обычно это занимает 9 секунд и на 49% повышает качество поиска собеседников\\!\n\nВы можете изменить ее в любой момент в настройках\\."
+
+# GIF URLs
+ONBOARDING_GIF = "https://media.giphy.com/media/6L53JiITO021awrmsj/giphy.gif"
+MAIN_MENU_GIF = "https://media.giphy.com/media/bYBaveMs5QvWkuhAmj/giphy.gif"
 
 # Common keyboard layouts
 MAIN_MENU_KEYBOARD = [
@@ -76,7 +82,7 @@ class BotState:
         # In this state messages are not deleted
         self.chat_initialization: Dict[int, bool] = {}
         # Whether to store media in the database (True) or on disk (False)
-        self.store_media_in_db: bool = True
+        self.store_media_in_db: bool = False
         # Dictionary to track if animation was shown to user
         self.animation_shown: Dict[int, bool] = {}
 
@@ -164,14 +170,6 @@ class ChatManager:
         # Проверяем, находится ли пользователь в поиске
         searching_users = await db.get_searching_users()
         if user_id not in searching_users and user_id not in self.state.users_searching:
-            # Return to main menu
-            reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-            await update_main_message(
-                user_id,
-                context,
-                MAIN_MENU_TEXT,
-                reply_markup
-            )
             return
             
         # Remove user from searching list
@@ -179,130 +177,217 @@ class ChatManager:
         
         # Update database status
         await db.set_user_searching(user_id, False)
-        
-        # Return to main menu
-        reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-        await update_main_message(
-            user_id,
-            context,
-            MAIN_MENU_TEXT,
-            reply_markup
-        )
     
     async def create_chat(self, user_id: int, partner_id: int, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
-        """
-        Create a new chat between two users.
-        
-        Args:
-            user_id: First user's Telegram ID
-            partner_id: Second user's Telegram ID
-            context: Telegram bot context
-            
-        Returns:
-            Chat ID if created successfully, None otherwise
-        """
-        # Create a new chat in the database
-        chat_id = await db.create_chat(user_id, partner_id)
-        
-        if not chat_id:
-            # If chat creation failed, show error and return to main menu
-            reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-            await update_main_message(
-                user_id,
-                context,
-                "Произошла ошибка при создании чата\\. Пожалуйста, попробуйте еще раз\\.",
-                reply_markup
-            )
-            return None
-        
-        # Update the active chats dictionary
-        self.state.active_chats[user_id] = partner_id
-        self.state.active_chats[partner_id] = user_id
-        
-        # Set chat initialization flag for both users
-        self.state.chat_initialization[user_id] = True
-        self.state.chat_initialization[partner_id] = True
-        
-        # Get user profiles if available
-        user_profile = await db.get_user_profile(user_id) 
-        partner_profile = await db.get_user_profile(partner_id)
-        
-        # Get user interests
-        user_interests = await db.get_user_interests(user_id)
-        partner_interests = await db.get_user_interests(partner_id)
-        
-        # Format profile information for user and partner
-        user_profile_text = await self._format_profile_info(user_profile, user_interests)
-        partner_profile_text = await self._format_profile_info(partner_profile, partner_interests)
-        
-        # Create keyboard with buttons in separate rows
-        # First button will be shown in pinned area, second button below the message
-        chat_keyboard = [
-            [InlineKeyboardButton("⏭️ Пропустить собеседника", callback_data="skip_chat")],
-            [InlineKeyboardButton("❌ Завершить чат", callback_data="stop_chat")]
-        ]
-        chat_markup = InlineKeyboardMarkup(chat_keyboard)
-        
-        # Send chat started messages to both users
-        user_message = await context.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ *Собеседник найден\\!*\n\n"
-                 f"{partner_profile_text}",
-            reply_markup=chat_markup,
-            parse_mode="MarkdownV2"
-        )
-        
-        partner_message = await context.bot.send_message(
-            chat_id=partner_id,
-            text=f"✅ *Собеседник найден\\!*\n\n"
-                 f"{user_profile_text}",
-            reply_markup=chat_markup,
-            parse_mode="MarkdownV2"
-        )
-        
-        # Pin the partner info messages
+        """Create a new chat between two users."""
         try:
-            await user_message.pin(disable_notification=True)
-            await partner_message.pin(disable_notification=True)
+            # Add users to active chats
+            self.state.active_chats[user_id] = partner_id
+            self.state.active_chats[partner_id] = user_id
             
-            # Delete pin notifications
-            await asyncio.sleep(1)
-            await delete_pin_message(user_id, context)
-            await delete_pin_message(partner_id, context)
+            # Get user profiles
+            user_profile = await db.get_user_profile(user_id)
+            partner_profile = await db.get_user_profile(partner_id)
+            
+            # Get user interests
+            user_interests = await db.get_user_interests(user_id)
+            partner_interests = await db.get_user_interests(partner_id)
+            
+            # Format profile information
+            user_profile_text = await self._format_profile_info(user_profile, user_interests)
+            partner_profile_text = await self._format_profile_info(partner_profile, partner_interests)
+            
+            # Create chat in database
+            chat_id = await db.create_chat(user_id, partner_id)
+            
+            # Get the search message from state
+            user_message_id = self.state.main_message_ids.get(user_id)
+            partner_message_id = self.state.main_message_ids.get(partner_id)
+            
+            # Create keyboard with chat controls
+            keyboard = CHAT_CONTROL_KEYBOARD
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Edit existing messages to show chat started
+            chat_started_text = (
+                "🎯 *Собеседник найден\\!*\n\n"
+                f"{partner_profile_text}\n\n"
+                "Используйте кнопки ниже для управления чатом\\."
+            )
+            
+            # Обрабатываем сообщение для первого пользователя
+            try:
+                if user_message_id:
+                    # Изменяем сообщение на обычное текстовое (без фото)
+                    await context.bot.edit_message_text(
+                        chat_id=user_id,
+                        message_id=user_message_id,
+                        text=chat_started_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    
+                    # Закрепляем сообщение
+                    try:
+                        await context.bot.pin_chat_message(
+                            chat_id=user_id,
+                            message_id=user_message_id,
+                            disable_notification=True
+                        )
+                        logger.info(f"Successfully pinned message {user_message_id} for user {user_id}")
+                        
+                        # Запоминаем ID закрепленного сообщения
+                        await db.update_main_message_id(user_id, user_message_id)
+                        
+                        # Удаляем уведомление о закреплении
+                        await asyncio.sleep(1)
+                        await delete_pin_message(user_id, context)
+                    except Exception as pin_error:
+                        logger.error(f"Error pinning message for user {user_id}: {pin_error}")
+            except telegram.error.BadRequest as e:
+                # Если не удается изменить текст, пробуем изменить caption (для сообщений с медиа)
+                logger.info(f"Could not edit message text, trying to edit caption: {e}")
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=user_id,
+                        message_id=user_message_id,
+                        caption=chat_started_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    
+                    # Закрепляем сообщение
+                    try:
+                        await context.bot.pin_chat_message(
+                            chat_id=user_id,
+                            message_id=user_message_id,
+                            disable_notification=True
+                        )
+                        logger.info(f"Successfully pinned message {user_message_id} for user {user_id}")
+                        
+                        # Запоминаем ID закрепленного сообщения
+                        await db.update_main_message_id(user_id, user_message_id)
+                        
+                        # Удаляем уведомление о закреплении
+                        await asyncio.sleep(1)
+                        await delete_pin_message(user_id, context)
+                    except Exception as pin_error:
+                        logger.error(f"Error pinning message for user {user_id}: {pin_error}")
+                except Exception as e2:
+                    logger.error(f"Error editing caption for user {user_id}: {e2}")
+                    # Отправляем новое сообщение только в случае, если все методы редактирования не сработали
+                    message = await context.bot.send_message(
+                        chat_id=user_id,
+                        text=chat_started_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    self.state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error editing message for user {user_id}: {e}")
+                # Отправляем новое сообщение, если не удалось изменить существующее
+                message = await context.bot.send_message(
+                    chat_id=user_id,
+                    text=chat_started_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+                self.state.main_message_ids[user_id] = message.message_id
+            
+            # Второй текст для сообщения партнеру
+            chat_started_text = (
+                "🎯 *Собеседник найден\\!*\n\n"
+                f"{user_profile_text}\n\n"
+                "Используйте кнопки ниже для управления чатом\\."
+            )
+            
+            # Обрабатываем сообщение для второго пользователя (партнера)
+            try:
+                if partner_message_id:
+                    # Изменяем сообщение на обычное текстовое (без фото)
+                    await context.bot.edit_message_text(
+                        chat_id=partner_id,
+                        message_id=partner_message_id,
+                        text=chat_started_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    
+                    # Закрепляем сообщение
+                    try:
+                        await context.bot.pin_chat_message(
+                            chat_id=partner_id,
+                            message_id=partner_message_id,
+                            disable_notification=True
+                        )
+                        logger.info(f"Successfully pinned message {partner_message_id} for partner {partner_id}")
+                        
+                        # Запоминаем ID закрепленного сообщения
+                        await db.update_main_message_id(partner_id, partner_message_id)
+                        
+                        # Удаляем уведомление о закреплении
+                        await asyncio.sleep(1)
+                        await delete_pin_message(partner_id, context)
+                    except Exception as pin_error:
+                        logger.error(f"Error pinning message for partner {partner_id}: {pin_error}")
+            except telegram.error.BadRequest as e:
+                # Если не удается изменить текст, пробуем изменить caption (для сообщений с медиа)
+                logger.info(f"Could not edit message text, trying to edit caption: {e}")
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=partner_id,
+                        message_id=partner_message_id,
+                        caption=chat_started_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    
+                    # Закрепляем сообщение
+                    try:
+                        await context.bot.pin_chat_message(
+                            chat_id=partner_id,
+                            message_id=partner_message_id,
+                            disable_notification=True
+                        )
+                        logger.info(f"Successfully pinned message {partner_message_id} for partner {partner_id}")
+                        
+                        # Запоминаем ID закрепленного сообщения
+                        await db.update_main_message_id(partner_id, partner_message_id)
+                        
+                        # Удаляем уведомление о закреплении
+                        await asyncio.sleep(1)
+                        await delete_pin_message(partner_id, context)
+                    except Exception as pin_error:
+                        logger.error(f"Error pinning message for partner {partner_id}: {pin_error}")
+                except Exception as e2:
+                    logger.error(f"Error editing caption for partner {partner_id}: {e2}")
+                    # Отправляем новое сообщение только в случае, если все методы редактирования не сработали
+                    message = await context.bot.send_message(
+                        chat_id=partner_id,
+                        text=chat_started_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    self.state.main_message_ids[partner_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error editing message for partner {partner_id}: {e}")
+                # Отправляем новое сообщение, если не удалось изменить существующее
+                message = await context.bot.send_message(
+                    chat_id=partner_id,
+                    text=chat_started_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+                self.state.main_message_ids[partner_id] = message.message_id
+            
+            return chat_id
+            
         except Exception as e:
-            logger.error(f"Error pinning partner info messages: {e}")
-        
-        # Store first messages to protect from deletion
-        self.state.first_messages[user_id] = user_message.message_id
-        self.state.first_messages[partner_id] = partner_message.message_id
-        
-        # Add messages to user_messages
-        if user_id not in self.state.user_messages:
-            self.state.user_messages[user_id] = []
-        self.state.user_messages[user_id].append(user_message.message_id)
-        
-        if partner_id not in self.state.user_messages:
-            self.state.user_messages[partner_id] = []
-        self.state.user_messages[partner_id].append(partner_message.message_id)
-        
-        # Update main message IDs with first message
-        self.state.main_message_ids[user_id] = user_message.message_id
-        self.state.main_message_ids[partner_id] = partner_message.message_id
-        
-        # Update main message IDs in database
-        await db.update_main_message_id(user_id, user_message.message_id)
-        await db.update_main_message_id(partner_id, partner_message.message_id)
-        
-        # After a delay, clear the chat initialization flags to allow message deletion
-        async def clear_initialization_flags():
-            await asyncio.sleep(2)  # Wait 2 seconds
-            self.state.chat_initialization[user_id] = False
-            self.state.chat_initialization[partner_id] = False
-        
-        # Start task to clear flags
-        asyncio.create_task(clear_initialization_flags())
-        
-        return chat_id
+            logger.error(f"Error creating chat: {e}")
+            # Clean up if chat creation fails
+            self.state.active_chats.pop(user_id, None)
+            self.state.active_chats.pop(partner_id, None)
+            return None
     
     async def _format_profile_info(self, profile, interests):
         """
@@ -381,25 +466,22 @@ class ChatManager:
         
         # Automatically unpin messages for both users
         try:
-            # Unpin messages for both users
+            # Unpin all messages for both users
+            # (Это останется для тех случаев, когда функция end_chat вызывается напрямую)
             await context.bot.unpin_all_chat_messages(chat_id=user_id)
-            await context.bot.unpin_all_chat_messages(chat_id=partner_id)
+            if partner_id:
+                await context.bot.unpin_all_chat_messages(chat_id=partner_id)
             
-            # Delete pin notifications
+            # Удаляем только уведомления о закреплении, но не сами закрепленные сообщения
+            # (Удаление самих сообщений делают функции stop_chat_new и skip_chat_new)
             try:
-                # Try to delete pin notifications multiple times
-                for _ in range(3):
-                    await delete_pin_message(user_id, context)
+                await delete_pin_message(user_id, context)
+                if partner_id:
                     await delete_pin_message(partner_id, context)
-                    await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"Error deleting pin messages: {e}")
         except Exception as e:
             logger.error(f"Error unpinning messages: {e}")
-        
-        # Clear messages from both users
-        await delete_messages(user_id, context)
-        await delete_messages(partner_id, context)
         
         # Remove from active chats dictionary
         if user_id in self.state.active_chats:
@@ -407,28 +489,7 @@ class ChatManager:
         if partner_id in self.state.active_chats:
             del self.state.active_chats[partner_id]
         
-        # Remove first message records
-        if user_id in self.state.first_messages:
-            del self.state.first_messages[user_id]
-        if partner_id in self.state.first_messages:
-            del self.state.first_messages[partner_id]
-        
-        # Показываем сообщение только партнёру (пользователь будет перенаправлен на главный экран)
-        end_chat_keyboard = [
-            [InlineKeyboardButton("🏠 Домой", callback_data="home")],
-            [InlineKeyboardButton("🔍 Начать поиск", callback_data="search_chat")],
-            [InlineKeyboardButton("👤 Профиль", callback_data="view_profile")],
-            [InlineKeyboardButton("❓ Поддержка", url="https://t.me/DoxGames_bot")]
-        ]
-        reply_markup = InlineKeyboardMarkup(end_chat_keyboard)
-        
-        await update_main_message(
-            partner_id,
-            context,
-            "❌ *Чат завершен собеседником\\.*\n\n"
-            "Диалог был завершен вашим собеседником\\. Нажмите кнопку *Начать поиск* для поиска нового собеседника\\.",
-            reply_markup
-        )
+        # Удаление сообщений происходит в функциях stop_chat_new и skip_chat_new
         
         return True
     
@@ -528,6 +589,24 @@ PROFILE_SETUP_AGE = "age"
 PROFILE_SETUP_INTERESTS = "interests"
 PROFILE_SETUP_COMPLETE = "complete"
 
+def escape_markdown_v2(text: str) -> str:
+    """
+    Escape special characters for MarkdownV2 format.
+    
+    Args:
+        text: Text to escape
+        
+    Returns:
+        Escaped text
+    """
+    # Characters that need escaping in MarkdownV2
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    
+    for char in special_chars:
+        text = text.replace(char, '\\' + char)
+    
+    return text
+
 async def download_media_file(
     context: ContextTypes.DEFAULT_TYPE, 
     file_id: str, 
@@ -616,26 +695,24 @@ async def download_media_file(
         # Create a file name with the unique ID
         new_filename = f"{unique_id}{file_ext}"
         
+        # Define the media directory - using relative path instead of absolute
+        MEDIA_DIR = "media"
+        
         # Create media type subdirectory if storing locally
-        if not state.store_media_in_db:
-            # Create directory structure
-            media_type_dir = os.path.join(MEDIA_DIR, message_type)
-            pathlib.Path(media_type_dir).mkdir(parents=True, exist_ok=True)
-            local_path = os.path.join(media_type_dir, new_filename)
-        else:
-            local_path = None
+        # Create directory structure
+        media_type_dir = os.path.join(MEDIA_DIR, message_type)
+        pathlib.Path(media_type_dir).mkdir(parents=True, exist_ok=True)
+        local_path = os.path.join(media_type_dir, new_filename)
         
-        # If storing in database, download file content
-        if state.store_media_in_db:
-            media_content = await tg_file.download_as_bytearray()
-            return local_path, unique_id, media_content, mime_type
+        # Download both file content for database and save to disk for backup
+        media_content = await tg_file.download_as_bytearray()
         
-        # If storing locally, save to disk
-        else:
-            # Download to local path
-            await tg_file.download_to_drive(custom_path=local_path)
-            logger.info(f"Downloaded {message_type} to {local_path}")
-            return local_path, unique_id, None, mime_type
+        # Always save to disk
+        await tg_file.download_to_drive(custom_path=local_path)
+        logger.info(f"Downloaded {message_type} to {local_path}")
+        
+        # Return both the local path and file content
+        return local_path, unique_id, media_content, mime_type
     
     except Exception as e:
         logger.error(f"Error downloading media file: {e}")
@@ -728,6 +805,11 @@ async def update_main_message(
         # If message ID exists, try to edit the message
         if message_id:
             try:
+                # Make sure text is properly escaped for MarkdownV2
+                # Only escape if the text doesn't already contain escaped chars
+                if '\\' not in new_text:
+                    new_text = escape_markdown_v2(new_text)
+                
                 # Try to edit existing message
                 message = await context.bot.edit_message_text(
                     chat_id=user_id,
@@ -753,6 +835,11 @@ async def update_main_message(
                 logger.warning(f"Could not edit main message for user {user_id}: {e}")
                 # Fall through to sending a new message
         
+        # Make sure text is properly escaped for MarkdownV2
+        # Only escape if the text doesn't already contain escaped chars
+        if '\\' not in new_text:
+            new_text = escape_markdown_v2(new_text)
+            
         # Send a new message if editing fails or no message ID exists
         message = await context.bot.send_message(
             chat_id=user_id,
@@ -775,21 +862,49 @@ async def update_main_message(
 
 async def home_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Command handler for /home and callback for 'home' button."""
-    # Обработка как команды, так и callback_query
     if update.callback_query:
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
+        # Редактируем существующее сообщение
+        try:
+            await query.edit_message_media(
+                media=InputMediaAnimation(
+                    media=MAIN_MENU_GIF,
+                    caption=MAIN_MENU_TEXT,
+                    parse_mode="MarkdownV2"
+                ),
+                reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+            )
+        except Exception as e:
+            logger.error(f"Error editing animation message: {e}")
+            # Если не удалось отредактировать с гифкой, редактируем текст
+            await query.edit_message_text(
+                text=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+            )
     elif update.message and update.effective_user:
         user_id = update.effective_user.id
+        # Для прямой команды отправляем новое сообщение
+        try:
+            await context.bot.send_animation(
+                chat_id=user_id,
+                animation=MAIN_MENU_GIF,
+                caption=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+            )
+        except Exception as e:
+            logger.error(f"Error sending animation: {e}")
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+            )
     else:
         return
-
-    # Сбрасываем состояние показа анимации
-    await reset_animation_shown(user_id)
-    
-    # Отправляем главное меню с гифкой
-    await send_main_menu_with_animation(user_id, context)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command handler."""
@@ -807,38 +922,65 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         last_name=user.last_name
     )
     
-    # Check if user is new (has never completed profile setup)
-    is_new_user = await db.is_new_user(user_id)
+    # Проверяем, заполнена ли анкета
+    profile_state, _ = await db.get_profile_setup_state(user_id)
     
-    if is_new_user:
-        # Offer profile setup for first-time users
-        keyboard = [
-            [InlineKeyboardButton("🖊 Начать", callback_data="setup_profile")],
-            [InlineKeyboardButton("↩️ Пропустить настройку", callback_data="skip_profile_setup")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        text = "*👨🏻‍💻 Добро пожаловать в DOX: Анонимный Чат*\n\n" \
-               "📝 Заполните быстро анкету, обычно *это занимает 9 секунд* и на *49%* повышает качество поиска собеседников\\!\n\n" \
-               "_Вы можете изменить ее в любой момент в настройках\\._"
-
-        if update.callback_query:
-            # If called from callback query (Home button)
-            query = update.callback_query
-            await query.answer()
-            await update_main_message(user_id, context, text, reply_markup)
+    # Если анкета заполнена, отправляем сразу на главное меню
+    if profile_state == PROFILE_SETUP_COMPLETE:
+        # Перенаправляем на home_command
+        if update.message:
+            # Создаем фейковый объект Update с message
+            fake_update = Update(update_id=update.update_id, message=update.message)
+            await home_command(fake_update, context)
         else:
-            # If called from /start command for new user
-            await update_main_message(user_id, context, text, reply_markup)
-    else:
-        # Для возвращающихся пользователей показываем главное меню с гифкой
-        if update.callback_query:
-            # If called from callback query (Home button)
-            query = update.callback_query
-            await query.answer()
+            # Создаем фейковый объект Update с callback_query
+            fake_update = Update(update_id=update.update_id, callback_query=update.callback_query)
+            await home_command(fake_update, context)
+        return
+    
+    # Если анкета не заполнена, показываем стандартное приветствие
+    # Создаем клавиатуру
+    keyboard = [
+        [InlineKeyboardButton("✍️ Начать", callback_data="setup_profile")],
+        [InlineKeyboardButton("↩️ Пропустить настройку", callback_data="skip_profile_setup")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Определяем, есть ли сообщение для удаления
+    message_to_delete = None
+    if update.callback_query and update.callback_query.message:
+        # Если это callback query
+        message_to_delete = update.callback_query.message
+    
+    try:
+        # Если есть сообщение для удаления, удаляем его
+        if message_to_delete:
+            await message_to_delete.delete()
         
-        # Отправляем главное меню с гифкой
-        await send_main_menu_with_animation(user_id, context)
+        # Отправляем новое сообщение с анимацией
+        message = await context.bot.send_animation(
+            chat_id=user_id,
+            animation=ONBOARDING_GIF,
+            caption=ONBOARDING_TEXT,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+        
+        # Сохраняем ID сообщения
+        state.main_message_ids[user_id] = message.message_id
+    except Exception as e:
+        logger.error(f"Error handling start command: {e}")
+        # В случае ошибки отправляем текстовое сообщение
+        try:
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=ONBOARDING_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            state.main_message_ids[user_id] = message.message_id
+        except Exception as e:
+            logger.error(f"Error sending fallback message: {e}")
 
 async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -855,9 +997,6 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.answer()
     user_id = query.from_user.id
     
-    # Delete any previous messages
-    await delete_messages(user_id, context)
-    
     # Check if user is already in an active chat
     if user_id in state.active_chats:
         partner_id = state.active_chats[user_id]
@@ -866,12 +1005,21 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         keyboard = CHAT_CONTROL_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update_main_message(
-            user_id,
-            context,
-            "Вы уже находитесь в активном чате\\. Используйте кнопки ниже для управления чатом\\.",
-            reply_markup
-        )
+        try:
+            await query.edit_message_media(
+                media=InputMediaAnimation(
+                    media=MAIN_MENU_GIF,
+                    caption="Вы уже находитесь в активном чате\\. Используйте кнопки ниже для управления чатом\\.",
+                    parse_mode="MarkdownV2"
+                ),
+                reply_markup=reply_markup
+            )
+            
+            # Save message ID in state
+            state.main_message_ids[user_id] = query.message.message_id
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            
         return
 
     # Проверяем статус поиска также из базы данных
@@ -884,31 +1032,21 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         keyboard = SEARCH_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update_main_message(
-            user_id,
-            context,
-            "Вы уже ищете собеседника\\. Пожалуйста, подождите\\.\n\nКогда собеседник будет найден, я вам сообщу\\.",
-            reply_markup
-        )
-        return
-    
-    # If the user hasn't completed their profile setup, prompt them
-    is_new_user = await db.is_new_user(user_id)
-    has_profile = await db.has_completed_profile(user_id)
-    
-    if is_new_user and not has_profile:
-        # Ask user to set up their profile first
-        keyboard = PROFILE_SETUP_KEYBOARD
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update_main_message(
-            user_id,
-            context,
-            "🔍 *Поиск собеседника*\n\n"
-            "Для лучшего подбора собеседника, рекомендуем заполнить ваш профиль\\.\n\n"
-            "Это поможет найти собеседника с общими интересами\\.",
-            reply_markup
-        )
+        try:
+            await query.edit_message_media(
+                media=InputMediaAnimation(
+                    media=MAIN_MENU_GIF,
+                    caption="Вы уже ищете собеседника\\. Пожалуйста, подождите\\.\n\nКогда собеседник будет найден, я вам сообщу\\.",
+                    parse_mode="MarkdownV2"
+                ),
+                reply_markup=reply_markup
+            )
+            
+            # Save message ID in state
+            state.main_message_ids[user_id] = query.message.message_id
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            
         return
     
     # Try to find a match for this user
@@ -919,11 +1057,40 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         state.users_searching.discard(partner_id)
         await db.set_user_searching(partner_id, False)
         
+        # Save message IDs before creating chat
+        state.main_message_ids[user_id] = query.message.message_id
+        state.main_message_ids[partner_id] = state.main_message_ids.get(partner_id)
+        
         # Create a new chat between these users
         await chat_manager.create_chat(user_id, partner_id, context)
     else:
         # No partner found, start searching
-        await chat_manager.start_search(user_id, context)
+        # First, add user to searching list
+        state.users_searching.add(user_id)
+        await db.set_user_searching(user_id, True)
+        
+        # Update message with search status
+        keyboard = SEARCH_KEYBOARD
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            await query.edit_message_media(
+                media=InputMediaAnimation(
+                    media=MAIN_MENU_GIF,
+                    caption="🔍 *Поиск собеседника*\n\n"
+                    "Ищем для вас собеседника\\.\n"
+                    "Это может занять некоторое время\\.\n\n"
+                    "Когда кто\\-то будет найден, я вам сообщу\\.",
+                    parse_mode="MarkdownV2"
+                ),
+                reply_markup=reply_markup
+            )
+            
+            # Save message ID in state
+            state.main_message_ids[user_id] = query.message.message_id
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            return
 
 async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -939,8 +1106,29 @@ async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
     user_id = query.from_user.id
     
-    # Use the chat manager to cancel the search
-    await chat_manager.cancel_search(user_id, context)
+    # Remove user from searching list
+    state.users_searching.discard(user_id)
+    # Also mark user as not searching in the database
+    await db.set_user_searching(user_id, False)
+    
+    # Return to main menu
+    keyboard = MAIN_MENU_KEYBOARD
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        await query.edit_message_media(
+            media=InputMediaAnimation(
+                media=MAIN_MENU_GIF,
+                caption=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2"
+            ),
+            reply_markup=reply_markup
+        )
+        # Save message ID in state
+        state.main_message_ids[user_id] = query.message.message_id
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        return
 
 async def delete_pin_message(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Delete the pin message using stored message ID."""
@@ -971,7 +1159,9 @@ async def delete_pin_message(user_id: int, context: ContextTypes.DEFAULT_TYPE):
                 possible_notification_ids = [
                     pinned_message_id + 1,
                     pinned_message_id + 2,
-                    pinned_message_id + 3
+                    pinned_message_id + 3,
+                    pinned_message_id + 4,
+                    pinned_message_id + 5
                 ]
                 
                 # Пытаемся удалить каждое возможное уведомление
@@ -982,727 +1172,375 @@ async def delete_pin_message(user_id: int, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         # Игнорируем ошибки, так как мы просто пытаемся угадать ID
                         pass
+                
+                # НЕ удаляем само закрепленное сообщение, оно должно остаться и быть изменено
+                
+            # Попытка удалить все сообщения с текстом о закреплении из последних 20 сообщений
+            # Это может быть сложно реализовать без специального API, поэтому пропускаем
+            
         except Exception as e:
             logger.error(f"Error in proactive pin notification cleanup: {e}")
             
     except Exception as e:
         logger.error(f"Error handling pin message deletion for user {user_id}: {e}")
 
-async def stop_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Stop an active chat.
-    
-    This function is triggered when a user clicks the "Stop Chat" button.
-    It ends the chat for both users and returns them to the main menu.
-    """
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-
-    await query.answer()
-    user_id = query.from_user.id
-    
-    # Use the chat manager to end the chat
-    success = await chat_manager.end_chat(user_id, context)
-    
-    # If ending chat was not successful, show error message
-    if not success:
-        reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-        await update_main_message(
-            user_id,
-            context,
-            "Вы не находитесь в активном чате или произошла ошибка\\.\n\n"
-            "Нажмите кнопку *Начать поиск* для поиска нового собеседника\\.",
-            reply_markup
-        )
-    else:
-        # Сбрасываем состояние показа анимации
-        await reset_animation_shown(user_id)
-        # Перенаправляем на главный экран с гифкой
-        await send_main_menu_with_animation(user_id, context)
-
-async def skip_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Skip the current chat and start searching for a new one.
-    
-    This function is triggered when a user clicks the "Skip Chat" button.
-    It ends the current chat and immediately starts searching for a new partner.
-    """
-    query = update.callback_query
-    if not query or not query.from_user:
-        return
-
-    await query.answer()
-    user_id = query.from_user.id
-    
-    # First, end the current chat
-    success = await chat_manager.end_chat(user_id, context)
-    
-    if not success:
-        # If ending chat was not successful, show error message
-        reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-        await query.edit_message_text(
-            text="Вы не находитесь в активном чате или произошла ошибка\\.\n\n"
-                 "Нажмите кнопку *Начать поиск* для поиска нового собеседника\\.",
-            reply_markup=reply_markup,
-            parse_mode="MarkdownV2"
-        )
-        return
-    
-    # Показываем сообщение о поиске в том же сообщении
-    keyboard = SEARCH_KEYBOARD
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text="🔍 *Поиск собеседника*\n\n"
-             "Ищем для вас собеседника\\.\n"
-             "Это может занять некоторое время\\.\n\n"
-             "Когда кто\\-то будет найден, я вам сообщу\\.",
-        reply_markup=reply_markup,
-        parse_mode="MarkdownV2"
-    )
-    
-    # Начинаем поиск нового собеседника, пропуская отправку сообщения
-    await chat_manager.start_search(user_id, context, skip_message=True)
-
-class MediaHandler:
-    """
-    Class to handle different types of media files in messages.
-    Encapsulates logic for processing and forwarding media messages.
-    """
-    
-    def __init__(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, partner_id: int):
-        """
-        Initialize the media handler.
-        
-        Args:
-            context: Telegram bot context
-            chat_id: Database chat ID
-            user_id: Sender user ID
-            partner_id: Receiver (partner) user ID
-        """
-        self.context = context
-        self.chat_id = chat_id
-        self.user_id = user_id
-        self.partner_id = partner_id
-    
-    async def handle_text(self, text: str) -> Optional[Message]:
-        """
-        Handle text message.
-        
-        Args:
-            text: Message text
-            
-        Returns:
-            Sent message to partner
-        """
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=text,
-            message_type='text'
-        )
-        
-        # Forward message to partner
-        partner_message = await self.context.bot.send_message(
-            chat_id=self.partner_id,
-            text=text
-        )
-        
-        return partner_message
-    
-    async def handle_photo(self, photo, caption: Optional[str] = None) -> Optional[Message]:
-        """
-        Handle photo message.
-        
-        Args:
-            photo: Photo object
-            caption: Optional caption text
-            
-        Returns:
-            Sent message to partner
-        """
-        # Get highest resolution photo
-        file_id = photo[-1].file_id
-        
-        # Download and store the photo
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'photo'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=caption,
-            message_type='photo',
-            file_id=file_id,
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward photo to partner
-        partner_message = await self.context.bot.send_photo(
-            chat_id=self.partner_id,
-            photo=file_id,
-            caption=caption
-        )
-        
-        return partner_message
-    
-    async def handle_video(self, video, caption: Optional[str] = None) -> Optional[Message]:
-        """
-        Handle video message.
-        
-        Args:
-            video: Video object
-            caption: Optional caption text
-            
-        Returns:
-            Sent message to partner
-        """
-        file_id = video.file_id
-        
-        # Download and store the video
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'video'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=caption,
-            message_type='video',
-            file_id=file_id,
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward video to partner
-        partner_message = await self.context.bot.send_video(
-            chat_id=self.partner_id,
-            video=file_id,
-            caption=caption
-        )
-        
-        return partner_message
-    
-    async def handle_voice(self, voice) -> Optional[Message]:
-        """
-        Handle voice message.
-        
-        Args:
-            voice: Voice object
-            
-        Returns:
-            Sent message to partner
-        """
-        file_id = voice.file_id
-        
-        # Download and store the voice message
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'voice'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=None,
-            message_type='voice',
-            file_id=file_id,
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward voice message to partner
-        partner_message = await self.context.bot.send_voice(
-            chat_id=self.partner_id,
-            voice=file_id
-        )
-        
-        return partner_message
-    
-    async def handle_sticker(self, sticker) -> Optional[Message]:
-        """
-        Handle sticker message.
-        
-        Args:
-            sticker: Sticker object
-            
-        Returns:
-            Sent message to partner
-        """
-        file_id = sticker.file_id
-        
-        # Download and store the sticker
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'sticker'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=None,
-            message_type='sticker',
-            file_id=file_id,
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward sticker to partner
-        partner_message = await self.context.bot.send_sticker(
-            chat_id=self.partner_id,
-            sticker=file_id
-        )
-        
-        return partner_message
-    
-    async def handle_video_note(self, video_note) -> Optional[Message]:
-        """
-        Handle video note message.
-        
-        Args:
-            video_note: VideoNote object
-            
-        Returns:
-            Sent message to partner
-        """
-        file_id = video_note.file_id
-        
-        # Download and store the video note
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'video_note'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=None,
-            message_type='video_note',
-            file_id=file_id, 
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward video note to partner
-        partner_message = await self.context.bot.send_video_note(
-            chat_id=self.partner_id,
-            video_note=file_id
-        )
-        
-        return partner_message
-        
-    async def handle_animation(self, animation, caption: Optional[str] = None) -> Optional[Message]:
-        """
-        Handle animation (GIF) message.
-        
-        Args:
-            animation: Animation object
-            caption: Optional caption text
-            
-        Returns:
-            Sent message to partner
-        """
-        file_id = animation.file_id
-        
-        # Download and store the animation
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'animation'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=caption,
-            message_type='animation',
-            file_id=file_id,
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward animation to partner
-        partner_message = await self.context.bot.send_animation(
-            chat_id=self.partner_id,
-            animation=file_id,
-            caption=caption
-        )
-        
-        return partner_message
-        
-    async def handle_audio(self, audio, caption: Optional[str] = None) -> Optional[Message]:
-        """
-        Handle audio message.
-        
-        Args:
-            audio: Audio object
-            caption: Optional caption text
-            
-        Returns:
-            Sent message to partner
-        """
-        file_id = audio.file_id
-        
-        # Download and store the audio
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'audio'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=caption,
-            message_type='audio',
-            file_id=file_id,
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward audio to partner
-        partner_message = await self.context.bot.send_audio(
-            chat_id=self.partner_id,
-            audio=file_id,
-            caption=caption
-        )
-        
-        return partner_message
-        
-    async def handle_document(self, document, caption: Optional[str] = None) -> Optional[Message]:
-        """
-        Handle document message.
-        
-        Args:
-            document: Document object
-            caption: Optional caption text
-            
-        Returns:
-            Sent message to partner
-        """
-        file_id = document.file_id
-        
-        # Download and store the document
-        local_path, unique_id, file_content, mime_type = await download_media_file(
-            self.context, file_id, 'document'
-        )
-        
-        # Store message in database
-        message_id = await db.add_message(
-            chat_id=self.chat_id,
-            sender_id=self.user_id,
-            content=caption,
-            message_type='document',
-            file_id=file_id,
-            local_file_path=local_path,
-            file_name=unique_id,
-            mime_type=mime_type,
-            file_content=file_content
-        )
-        
-        # Forward document to partner
-        partner_message = await self.context.bot.send_document(
-            chat_id=self.partner_id,
-            document=file_id,
-            caption=caption
-        )
-        
-        return partner_message
-        
-    async def handle_unsupported(self) -> None:
-        """
-        Handle unsupported message type.
-        
-        Returns:
-            None
-        """
-        await self.context.bot.send_message(
-            chat_id=self.user_id,
-            text="⚠️ Этот тип сообщений не поддерживается."
-        )
-        return None
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming messages."""
-    
-    if not update.effective_user:
-        return
-    
-    user_id = update.effective_user.id
-    
-    try:
-        # Check if this user is in an active chat
-        if user_id not in state.active_chats:
-            # User is not in active chat, show message
-            reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-            await update_main_message(
-                user_id,
-                context,
-                "Вы не находитесь в активном чате\\. Нажмите кнопку *Начать поиск* для поиска собеседника\\.",
-                reply_markup
-            )
-            return
-        
-        # Get the partner ID from active chats
-        partner_id = state.active_chats[user_id]
-        
-        # Get active chat ID from database
-        chat_result = await db.get_active_chat(user_id)
-        if not chat_result:
-            # Chat not found in database, clean up memory and show message
-            if user_id in state.active_chats:
-                del state.active_chats[user_id]
-            if partner_id in state.active_chats:
-                del state.active_chats[partner_id]
-            
-            reply_markup = InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
-            await update_main_message(
-                user_id,
-                context,
-                "Ваш чат был завершен\\. Нажмите кнопку *Начать поиск* для поиска нового собеседника\\.",
-                reply_markup
-            )
-            return
-        
-        chat_id, _ = chat_result
-        
-        # Store message in user_messages for possible later deletion
-        if update.message:
-            if user_id not in state.user_messages:
-                state.user_messages[user_id] = []
-            state.user_messages[user_id].append(update.message.message_id)
-        
-        # Create media handler
-        media_handler = MediaHandler(context, chat_id, user_id, partner_id)
-        
-        # Process different message types
-        partner_message = None
-        message = update.message
-        
-        if message.text:
-            partner_message = await media_handler.handle_text(message.text)
-        elif message.photo:
-            partner_message = await media_handler.handle_photo(message.photo, message.caption)
-        elif message.video:
-            partner_message = await media_handler.handle_video(message.video, message.caption)
-        elif message.voice:
-            partner_message = await media_handler.handle_voice(message.voice)
-        elif message.sticker:
-            partner_message = await media_handler.handle_sticker(message.sticker)
-        elif message.video_note:
-            partner_message = await media_handler.handle_video_note(message.video_note)
-        elif message.animation:
-            partner_message = await media_handler.handle_animation(message.animation, message.caption)
-        elif message.audio:
-            partner_message = await media_handler.handle_audio(message.audio, message.caption)
-        elif message.document:
-            partner_message = await media_handler.handle_document(message.document, message.caption)
-        else:
-            await media_handler.handle_unsupported()
-        
-        # Store partner's message for possible later deletion
-        if partner_message:
-            if partner_id not in state.user_messages:
-                state.user_messages[partner_id] = []
-            state.user_messages[partner_id].append(partner_message.message_id)
-        
-    except Exception as e:
-        # В случае ошибки тоже снимаем флаг
-        if user_id in state.chat_initialization:
-            state.chat_initialization[user_id] = False
-        logger.error(f"Error handling message from {user_id}: {e}")
-        
-        # Используем update_main_message для показа ошибки вместо отправки нового сообщения
-        keyboard = CHAT_CONTROL_KEYBOARD
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update_main_message(
-            user_id,
-            context,
-            "Произошла ошибка при отправке сообщения. Попробуйте еще раз или используйте кнопки ниже для управления чатом.",
-            reply_markup
-        )
-
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /stop command."""
+async def pin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pin a message in the chat."""
     if not update.message or not update.effective_user:
         return
 
     user_id = update.effective_user.id
     
-    # Check if user is in chat
-    active_chat = await db.get_active_chat(user_id)
-    if not active_chat:
+    # Проверяем, находится ли пользователь в активном чате
+    if user_id not in state.active_chats:
         await update.message.reply_text("Вы не находитесь в активном чате.")
         return
+    
+    # Проверяем, есть ли сообщение для закрепления (ответ на сообщение)
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Для закрепления сообщения ответьте на него командой /pin")
+        return
+    
+    message_to_pin = update.message.reply_to_message
+    
+    try:
+        # Закрепляем сообщение
+        await context.bot.pin_chat_message(
+            chat_id=user_id,
+            message_id=message_to_pin.message_id,
+            disable_notification=True
+        )
+        
+        # Удаляем уведомление о закреплении
+        await asyncio.sleep(1)
+        await delete_pin_message(user_id, context)
+        
+        logger.info(f"Successfully pinned message {message_to_pin.message_id} for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error pinning message: {e}")
+        await update.message.reply_text("Не удалось закрепить сообщение.")
 
-    chat_id, partner_id = active_chat
+async def unpin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Unpin all messages in the chat."""
+    if not update.message or not update.effective_user:
+        return
+
+    user_id = update.effective_user.id
     
-    # Remove both users from chat
-    await db.remove_chat(chat_id)
+    # Проверяем, находится ли пользователь в активном чате
+    if user_id not in state.active_chats:
+        await update.message.reply_text("Вы не находитесь в активном чате.")
+        return
     
-    # Send messages to both users
+    try:
+        # Открепляем все сообщения
+        await context.bot.unpin_all_chat_messages(chat_id=user_id)
+        
+        # Удаляем уведомления о закреплении
+        await delete_pin_message(user_id, context)
+        
+        await update.message.reply_text("Все закрепленные сообщения откреплены.")
+        logger.info(f"Successfully unpinned all messages for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error unpinning messages: {e}")
+        await update.message.reply_text("Не удалось открепить сообщения.")
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop command handler. Ends the current chat."""
+    if not update.message or not update.effective_user:
+        return
+    
+    user_id = update.effective_user.id
+    
+    # Проверяем, находится ли пользователь в активном чате
+    if user_id not in state.active_chats:
+        await update.message.reply_text("Вы не находитесь в активном чате.")
+        return
+    
+    # Получаем ID партнера перед завершением чата
+    partner_id = state.active_chats.get(user_id)
+    
+    # Очищаем все сообщения у обоих пользователей
+    await clear_all_messages(user_id, context)
+    if partner_id:
+        await clear_all_messages(partner_id, context)
+    
+    # End current chat
+    success = await chat_manager.end_chat(user_id, context)
+    if not success:
+        await update.message.reply_text("Не удалось завершить чат.")
+        return
+    
+    # Return to main menu
     keyboard = MAIN_MENU_KEYBOARD
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await context.bot.send_message(
-        chat_id=user_id,
-        text="Чат завершен. Нажмите кнопку ниже, чтобы начать новый поиск.",
-        reply_markup=reply_markup
-    )
-    
-    await context.bot.send_message(
-        chat_id=partner_id,
-        text="Собеседник завершил чат. Нажмите кнопку ниже, чтобы начать новый поиск.",
-        reply_markup=reply_markup
-    )
-
-async def pin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Pin a message that was replied to."""
-    if not update.message or not update.effective_user or not update.message.reply_to_message:
-        return
-
-    user_id = update.effective_user.id
-    
-    # Check if user is in chat
-    active_chat = await db.get_active_chat(user_id)
-    if not active_chat:
-        # Используем update_main_message вместо reply_text
-        keyboard = MAIN_MENU_KEYBOARD
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update_main_message(
-            user_id,
-            context,
-            "Вы не находитесь в активном чате. Нажмите кнопку ниже, чтобы начать поиск.",
-            reply_markup
-        )
-        
-        # Удаляем команду
-        try:
-            await context.bot.delete_message(chat_id=user_id, message_id=update.message.message_id)
-        except Exception as e:
-            logger.error(f"Error deleting pin command: {e}")
-            
-        return
-
-    chat_id, partner_id = active_chat
-    
     try:
-        # Store the original command message to delete it later
-        command_message = update.message
-        command_message_id = command_message.message_id
-        
-        # Pin the message with notifications disabled
-        message_to_pin = update.message.reply_to_message
-        await message_to_pin.pin(disable_notification=True)
-        
-        # Wait for pin notification to appear and delete it
-        await asyncio.sleep(1)
-        
-        # Try to delete pin notification several times
-        for attempt in range(5):
-            try:
-                # Delete the original command
-                await context.bot.delete_message(chat_id=user_id, message_id=command_message_id)
-            except Exception as e:
-                logger.error(f"Error deleting command message: {e}")
-            
-            # Try to delete pin notification
-            await delete_pin_message(user_id, context)
-            
-            await asyncio.sleep(0.5)
-        
-        # Get current keyboard
-        keyboard = CHAT_CONTROL_KEYBOARD
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Update partner's main message with notification
-        await update_main_message(
-            partner_id,
-            context,
-            "Собеседник закрепил сообщение!\nВы в чате с собеседником.",
-            reply_markup
+        message = await context.bot.send_animation(
+            chat_id=user_id,
+            animation=MAIN_MENU_GIF,
+            caption=MAIN_MENU_TEXT,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
         )
-        
+        # Save message ID in state
+        state.main_message_ids[user_id] = message.message_id
     except Exception as e:
-        logger.error(f"Error pinning message: {e}")
-        
-        # Используем update_main_message вместо reply_text
-        keyboard = CHAT_CONTROL_KEYBOARD
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update_main_message(
-            user_id,
-            context,
-            "Не удалось закрепить сообщение. Вы в чате с собеседником.",
-            reply_markup
+        logger.error(f"Error sending animation: {e}")
+        # В случае ошибки отправляем текстовое сообщение
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=MAIN_MENU_TEXT,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
         )
+        state.main_message_ids[user_id] = message.message_id
+
+async def skip_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle skip chat button press."""
+    query = update.callback_query
+    if not query:
+        return
         
-        # Удаляем команду
-        try:
-            await context.bot.delete_message(chat_id=user_id, message_id=update.message.message_id)
-        except Exception as e:
-            logger.error(f"Error deleting pin command after error: {e}")
-
-async def unpin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Unpin the current pinned message."""
-    if not update.message or not update.effective_user:
-        return
-
-    user_id = update.effective_user.id
+    await query.answer()
+    user_id = query.from_user.id
     
-    # Check if user is in chat
-    active_chat = await db.get_active_chat(user_id)
-    if not active_chat:
-        await update.message.reply_text("Вы не находитесь в активном чате.")
-        return
-
-    chat_id, partner_id = active_chat
+    # Получаем ID партнера перед завершением чата
+    partner_id = state.active_chats.get(user_id)
     
+    # Получаем информацию о закрепленном сообщении перед удалением чата
+    pinned_message_id = None
     try:
-        # Get chat and unpin message
         chat = await context.bot.get_chat(user_id)
         if chat.pinned_message:
-            await chat.unpin_message()
-            
-            # Delete pin notification messages
-            await delete_pin_message(user_id, context)
+            pinned_message_id = chat.pinned_message.message_id
+    except Exception as e:
+        logger.error(f"Error getting pinned message: {e}")
+    
+    # Удаляем только уведомления о закреплении, но не само закрепленное сообщение
+    try:
+        # Снимаем закрепление, чтобы убрать значок закрепления
+        await context.bot.unpin_all_chat_messages(chat_id=user_id)
+        # Удаляем уведомления о закреплении
+        await delete_pin_message(user_id, context)
+        
+        # Для партнера также удаляем уведомления
+        if partner_id:
+            await context.bot.unpin_all_chat_messages(chat_id=partner_id)
             await delete_pin_message(partner_id, context)
-            
-            # Send notifications
-            await context.bot.send_message(
+    except Exception as e:
+        logger.error(f"Error unpinning messages: {e}")
+    
+    # Очищаем все сообщения у обоих пользователей, кроме закрепленного сообщения
+    if pinned_message_id and user_id in state.user_messages:
+        # Временно удаляем закрепленное сообщение из списка для удаления
+        if pinned_message_id in state.user_messages[user_id]:
+            state.user_messages[user_id].remove(pinned_message_id)
+    
+    # Теперь удаляем все сообщения из Telegram
+    await clear_all_messages(user_id, context)
+    if partner_id:
+        await clear_all_messages(partner_id, context)
+    
+    # End current chat
+    success = await chat_manager.end_chat(user_id, context)
+    if not success:
+        return
+    
+    # Сохраняем закрепленное сообщение обратно в список сообщений пользователя
+    if pinned_message_id:
+        if user_id not in state.user_messages:
+            state.user_messages[user_id] = []
+        state.user_messages[user_id].append(pinned_message_id)
+        state.main_message_ids[user_id] = pinned_message_id
+        
+    # Start searching for new chat - изменяем закрепленное сообщение на сообщение поиска
+    keyboard = SEARCH_KEYBOARD
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        # Если у нас есть закрепленное сообщение, изменяем его вместо создания нового
+        if pinned_message_id:
+            await context.bot.edit_message_text(
                 chat_id=user_id,
-                text="Сообщение откреплено!"
-            )
-            await context.bot.send_message(
-                chat_id=partner_id,
-                text="Собеседник открепил сообщение!"
+                message_id=pinned_message_id,
+                text="🔍 *Поиск нового собеседника*\n\n"
+                    "Ищем для вас нового собеседника\\.\n"
+                    "Обычно это занимает несколько минут\\.\n\n"
+                    "Когда кто\\-то будет найден, я вам сообщу\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
             )
         else:
-            await update.message.reply_text("Нет закрепленных сообщений.")
-            
+            # Если закрепленного сообщения нет, отправляем новое
+            message = await context.bot.send_animation(
+                chat_id=user_id,
+                animation=MAIN_MENU_GIF,
+                caption="🔍 *Поиск нового собеседника*\n\n"
+                     "Ищем для вас нового собеседника\\.\n"
+                     "Обычно это занимает несколько минут\\.\n\n"
+                     "Когда кто\\-то будет найден, я вам сообщу\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            state.main_message_ids[user_id] = message.message_id
+        logger.error(f"Error updating message: {e}")
+        # В случае ошибки отправляем новое сообщение
+        try:
+            message = await context.bot.send_animation(
+                chat_id=user_id,
+                animation=MAIN_MENU_GIF,
+                caption="🔍 *Поиск нового собеседника*\n\n"
+                     "Ищем для вас нового собеседника\\.\n"
+                     "Обычно это занимает несколько минут\\.\n\n"
+                     "Когда кто\\-то будет найден, я вам сообщу\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            state.main_message_ids[user_id] = message.message_id
+        except Exception as e2:
+            logger.error(f"Error sending fallback message: {e2}")
+            return
+    
+    # Start the search process - добавляем пользователя в поиск
+    state.users_searching.add(user_id)
+    await db.set_user_searching(user_id, True)
+
+async def stop_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle stop chat button press."""
+    query = update.callback_query
+    if not query:
+        return
+        
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Получаем ID партнера перед завершением чата
+    partner_id = state.active_chats.get(user_id)
+    
+    # Уведомляем партнера о том, что пользователь покинул чат
+    if partner_id:
+        partner_pinned_message_id = None
+        try:
+            partner_chat = await context.bot.get_chat(partner_id)
+            if partner_chat.pinned_message:
+                partner_pinned_message_id = partner_chat.pinned_message.message_id
+                
+                # Создаем клавиатуру для партнера с кнопками для следующих действий
+                partner_keyboard = [
+                    [
+                        InlineKeyboardButton("🔍 Новый собеседник", callback_data="search_chat"),
+                        InlineKeyboardButton("🏠 Главное меню", callback_data="home")
+                    ]
+                ]
+                partner_reply_markup = InlineKeyboardMarkup(partner_keyboard)
+                
+                # Изменяем закрепленное сообщение партнера
+                await context.bot.edit_message_text(
+                    chat_id=partner_id,
+                    message_id=partner_pinned_message_id,
+                    text="❌ *Ваш собеседник покинул чат*\n\nВыберите действие:",
+                    parse_mode="MarkdownV2",
+                    reply_markup=partner_reply_markup
+                )
+        except Exception as e:
+            logger.error(f"Error notifying partner about chat end: {e}")
+    
+    # Получаем информацию о закрепленном сообщении перед удалением чата
+    pinned_message_id = None
+    try:
+        chat = await context.bot.get_chat(user_id)
+        if chat.pinned_message:
+            pinned_message_id = chat.pinned_message.message_id
     except Exception as e:
-        logger.error(f"Error unpinning message: {e}")
-        await update.message.reply_text("Не удалось открепить сообщение.")
+        logger.error(f"Error getting pinned message: {e}")
+    
+    # Удаляем только уведомления о закреплении, но не само закрепленное сообщение
+    try:
+        # Снимаем закрепление, чтобы убрать значок закрепления
+        await context.bot.unpin_all_chat_messages(chat_id=user_id)
+        # Удаляем уведомления о закреплении
+        await delete_pin_message(user_id, context)
+        
+        # Для партнера также удаляем уведомления
+        if partner_id:
+            await context.bot.unpin_all_chat_messages(chat_id=partner_id)
+            await delete_pin_message(partner_id, context)
+    except Exception as e:
+        logger.error(f"Error unpinning messages: {e}")
+    
+    # Очищаем все сообщения у обоих пользователей, кроме закрепленного сообщения
+    if pinned_message_id and user_id in state.user_messages:
+        # Временно удаляем закрепленное сообщение из списка для удаления
+        if pinned_message_id in state.user_messages[user_id]:
+            state.user_messages[user_id].remove(pinned_message_id)
+    
+    # Если есть закрепленное сообщение у партнера, исключаем его из удаления
+    if partner_id and partner_pinned_message_id and partner_id in state.user_messages:
+        if partner_pinned_message_id in state.user_messages[partner_id]:
+            state.user_messages[partner_id].remove(partner_pinned_message_id)
+    
+    # Теперь удаляем все сообщения из Telegram
+    await clear_all_messages(user_id, context)
+    if partner_id:
+        await clear_all_messages(partner_id, context)
+    
+    # End current chat
+    success = await chat_manager.end_chat(user_id, context)
+    if not success:
+        return
+    
+    # Сохраняем закрепленное сообщение обратно в список сообщений пользователя
+    if pinned_message_id:
+        if user_id not in state.user_messages:
+            state.user_messages[user_id] = []
+        state.user_messages[user_id].append(pinned_message_id)
+        state.main_message_ids[user_id] = pinned_message_id
+        
+    # Сохраняем закрепленное сообщение партнера, если оно существует
+    if partner_id and partner_pinned_message_id:
+        if partner_id not in state.user_messages:
+            state.user_messages[partner_id] = []
+        state.user_messages[partner_id].append(partner_pinned_message_id)
+        state.main_message_ids[partner_id] = partner_pinned_message_id
+        
+    # Return to main menu (home command)
+    keyboard = MAIN_MENU_KEYBOARD
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    try:
+        # Если у нас есть закрепленное сообщение, изменяем его на главное меню
+        if pinned_message_id:
+            await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=pinned_message_id,
+                text=MAIN_MENU_TEXT,
+                reply_markup=reply_markup
+            )
+        else:
+            # Если закрепленного сообщения нет, отправляем новое
+            message = await context.bot.send_animation(
+                chat_id=user_id,
+                animation=MAIN_MENU_GIF,
+                caption=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            state.main_message_ids[user_id] = message.message_id
+    except Exception as e:
+        logger.error(f"Error updating message: {e}")
+        # В случае ошибки отправляем новое сообщение
+        try:
+            message = await context.bot.send_animation(
+                chat_id=user_id,
+                animation=MAIN_MENU_GIF,
+                caption=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            state.main_message_ids[user_id] = message.message_id
+        except Exception as e:
+            logger.error(f"Error sending fallback message: {e}")
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear chat history for both users."""
@@ -1788,489 +1626,368 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle service messages like pin notifications."""
-    if not update.message:
-        return
-    
-    # Убедимся, что это сообщение от Telegram, а не от пользователя
-    is_system_message = update.message.from_user and update.message.from_user.id == 777000
-    is_pinned_update = update.message.pinned_message is not None
-    
-    # Check if this is a pin notification (multiple variants)
-    pin_messages = [
-        "Закреплено сообщение",
-        "Pinned message",
-        "Сообщение закреплено",
-        "Message pinned",
-        "pinned",
-        "закреплено"
-    ]
-    
-    # Проверка на системное сообщение о закреплении
-    is_pin_message = update.message.text and any(text.lower() in update.message.text.lower() for text in pin_messages)
-    
-    # Если это обновление о закреплении или похоже на уведомление о закреплении
-    if is_pinned_update or is_system_message or is_pin_message:
-        try:
-            logger.info(f"Found pin notification: {update.message.text or 'No text'}, message_id: {update.message.message_id}")
-            
-            # Delete the pin notification immediately
-            await update.message.delete()
-            logger.info(f"Successfully deleted pin notification message {update.message.message_id}")
-            
-            # Store this message ID in case we need to delete it later
-            if update.effective_chat:
-                user_id = update.effective_chat.id
-                await db.update_pin_message_id(user_id, update.message.message_id)
-        except Exception as e:
-            logger.error(f"Error deleting pin notification: {e}")
-    
-    # Если это не уведомление о закреплении, но похоже на сервисное сообщение, проверим еще раз
-    elif update.message.text and len(update.message.text) < 100 and not update.message.reply_to_message:
-        # Проверим, не похоже ли это на автоматическое сообщение
-        if any(phrase in update.message.text.lower() for phrase in ["bot", "telegram", "message", "сообщение"]):
-            try:
-                # Проверим, не слишком ли активно сообщения пользователя
-                if update.message.from_user and update.message.from_user.id != 777000:
-                    active_chat = await db.get_active_chat(update.message.from_user.id)
-                    if active_chat:
-                        # Если это обычный чат, не будем удалять сообщение
-                        return
-                
-                logger.info(f"Found potential service message: {update.message.text}")
-                await update.message.delete()
-                logger.info(f"Deleted potential service message {update.message.message_id}")
-            except Exception as e:
-                logger.error(f"Error handling potential service message: {e}")
+    # Сюда добавить обработку служебных сообщений Telegram
+    pass
 
-async def media_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show statistics about saved media files."""
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle user messages."""
     if not update.message or not update.effective_user:
         return
 
     user_id = update.effective_user.id
+    message = update.message
+    message_id = message.message_id
     
-    # Check if user is in chat
+    logger.info(f"Handling message {message_id} from user {user_id}")
+
+    # Добавляем сохранение ID сообщения в самом начале функции
+    if user_id not in state.user_messages:
+        state.user_messages[user_id] = []
+    
+    # Добавляем ID сообщения отправителя в список немедленно
+    state.user_messages[user_id].append(message_id)
+    logger.info(f"Added message {message_id} to user_messages for user {user_id}")
+    
+    # Установка флага инициализации чата для пользователя
+    state.chat_initialization[user_id] = True
+    
+    # Если это первое сообщение пользователя, сохраняем его ID
+    if user_id not in state.first_messages:
+        state.first_messages[user_id] = message_id
+        logger.info(f"Saved first message {message_id} for user {user_id}")
+    
+    # Определяем тип сообщения
+    message_type = None
+    content = None
+    file_id = None
+    
+    if message.text:
+        message_type = "text"
+        content = message.text
+    elif message.photo:
+        message_type = "photo"
+        file_id = message.photo[-1].file_id  # Берем самое большое разрешение
+        content = message.caption  # Сохраняем подпись к фото, если есть
+    elif message.video:
+        message_type = "video"
+        file_id = message.video.file_id
+        content = message.caption  # Сохраняем подпись к видео, если есть
+    elif message.voice:
+        message_type = "voice"
+        file_id = message.voice.file_id
+    elif message.sticker:
+        message_type = "sticker"
+        file_id = message.sticker.file_id
+    elif message.video_note:
+        message_type = "video_note"
+        file_id = message.video_note.file_id
+    else:
+        # Если тип сообщения не поддерживается, отправляем уведомление
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Этот тип сообщений не поддерживается."
+        )
+        state.chat_initialization[user_id] = False
+        return
+
+    # Check if user is in active chat
     active_chat = await db.get_active_chat(user_id)
     if not active_chat:
-        await update.message.reply_text("Вы не находитесь в активном чате.")
-        return
-
-    chat_id, partner_id = active_chat
-    
-    try:
-        # Получаем все медиа-сообщения в чате
-        media_messages = await db.get_chat_media(chat_id)
+        keyboard = MAIN_MENU_KEYBOARD
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if not media_messages:
-            await update.message.reply_text("В текущем чате нет медиафайлов.")
-            return
-        
-        # Счетчики статистики
-        media_stats = {}  # Статистика по типам сообщений
-        db_files_count = 0  # Количество файлов в базе данных
-        local_files_count = 0  # Количество файлов на диске
-        
-        # Проверяем наличие и размеры медиафайлов
-        total_db_size = 0  # Размер файлов в базе данных в байтах
-        total_local_size = 0  # Размер файлов на диске в байтах
-        
-        # Список запросов для получения размеров файлов из базы данных
-        msg_ids = [msg['id'] for msg in media_messages]
-        
-        # Для каждого сообщения получаем информацию о наличии контента в базе данных
-        for msg in media_messages:
-            msg_id = msg['id']
-            msg_type = msg['message_type']
-            
-            # Статистика по типам
-            if msg_type not in media_stats:
-                media_stats[msg_type] = 0
-            media_stats[msg_type] += 1
-            
-            # Проверяем наличие в базе данных
-            media_content = await db.get_media_content(msg_id)
-            if media_content and media_content[0]:  # Если есть бинарные данные
-                db_files_count += 1
-                total_db_size += len(media_content[0])
-            
-            # Проверяем наличие на диске
-            if msg['local_file_path'] and os.path.exists(msg['local_file_path']):
-                local_files_count += 1
-                total_local_size += os.path.getsize(msg['local_file_path'])
-        
-        # Формируем ответ
-        stats_text = "📊 Статистика медиафайлов в чате:\n\n"
-        
-        # Статистика по типам медиа
-        for media_type, count in media_stats.items():
-            emoji = {
-                'photo': '🖼️',
-                'video': '🎬',
-                'voice': '🎤',
-                'sticker': '🎭',
-                'video_note': '🎥'
-            }.get(media_type, '📎')
-            
-            stats_text += f"{emoji} {media_type}: {count}\n"
-        
-        total_media = len(media_messages)
-        stats_text += f"\n📁 Всего медиафайлов: {total_media}"
-        
-        # Информация о хранении в базе данных
-        if db_files_count > 0:
-            stats_text += f"\n💾 Сохранено в базе данных: {db_files_count} ({int(db_files_count/total_media*100)}%)"
-            
-            # Размер в базе данных
-            if total_db_size > 0:
-                if total_db_size < 1024:
-                    db_size_str = f"{total_db_size} B"
-                elif total_db_size < 1024 * 1024:
-                    db_size_str = f"{total_db_size / 1024:.1f} KB"
-                else:
-                    db_size_str = f"{total_db_size / (1024 * 1024):.1f} MB"
-                    
-                stats_text += f"\n📊 Размер в базе данных: {db_size_str}"
-        
-        # Информация о локальном хранении
-        if local_files_count > 0:
-            stats_text += f"\n📂 Сохранено локально: {local_files_count} ({int(local_files_count/total_media*100)}%)"
-            
-            # Размер на диске
-            if total_local_size > 0:
-                if total_local_size < 1024:
-                    local_size_str = f"{total_local_size} B"
-                elif total_local_size < 1024 * 1024:
-                    local_size_str = f"{total_local_size / 1024:.1f} KB"
-                else:
-                    local_size_str = f"{total_local_size / (1024 * 1024):.1f} MB"
-                    
-                stats_text += f"\n📊 Размер локальных файлов: {local_size_str}"
-        
-        # Информация о настройках хранения
-        stats_text += f"\n\n⚙️ Режим хранения медиафайлов: {'В базе данных' if state.store_media_in_db else 'На диске'}"
-        
-        await update.message.reply_text(stats_text)
-        
-    except Exception as e:
-        logger.error(f"Error getting media stats: {e}")
-        await update.message.reply_text("Произошла ошибка при получении статистики медиафайлов.")
-
-async def resend_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Resend the last media file from database or local storage."""
-    if not update.message or not update.effective_user:
-        return
-
-    user_id = update.effective_user.id
-    
-    # Check if user is in chat
-    active_chat = await db.get_active_chat(user_id)
-    if not active_chat:
-        await update.message.reply_text("Вы не находитесь в активном чате.")
-        return
-
-    chat_id, partner_id = active_chat
-    
-    try:
-        # Получаем последнее медиа-сообщение
-        media_messages = await db.get_chat_media(chat_id)
-        
-        if not media_messages:
-            await update.message.reply_text("В текущем чате нет медиафайлов.")
-            return
-        
-        # Берем первое (самое новое) медиа-сообщение
-        media_message = media_messages[0]
-        message_id = media_message['id']
-        message_type = media_message['message_type']
-        
-        # Получаем информацию о медиа
-        media_info = await db.get_message_media(message_id)
-        
-        # Проверяем, есть ли файл в базе данных
-        media_content = await db.get_media_content(message_id)
-        
-        if media_content:
-            file_content, file_name, mime_type = media_content
-            if file_content:
-                await update.message.reply_text(f"Повторная отправка {message_type} из базы данных...")
-                
-                # Создаем временный файл для отправки
-                temp_file_path = os.path.join(MEDIA_DIR, "temp", file_name or f"temp_{uuid.uuid4()}")
-                os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
-                
-                # Записываем содержимое файла
-                async with aiofiles.open(temp_file_path, 'wb') as f:
-                    await f.write(file_content)
-                
-                # Отправляем файл
-                with open(temp_file_path, 'rb') as file:
-                    if message_type == "photo":
-                        await context.bot.send_photo(chat_id=user_id, photo=file)
-                    elif message_type == "video":
-                        await context.bot.send_video(chat_id=user_id, video=file)
-                    elif message_type == "voice":
-                        await context.bot.send_voice(chat_id=user_id, voice=file)
-                    elif message_type == "sticker":
-                        # Для стикеров лучше использовать file_id
-                        if media_info['file_id']:
-                            await context.bot.send_sticker(chat_id=user_id, sticker=media_info['file_id'])
-                        else:
-                            await context.bot.send_document(chat_id=user_id, document=file)
-                    elif message_type == "video_note":
-                        await context.bot.send_video_note(chat_id=user_id, video_note=file)
-                
-                # Удаляем временный файл
-                try:
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    logger.error(f"Error removing temp file: {e}")
-                
-                await update.message.reply_text(f"Медиафайл успешно отправлен из базы данных.")
-                return
-        
-        # Если файла в базе нет или не удалось его использовать, пробуем локальное хранилище
-        if media_info['local_file_path'] and os.path.exists(media_info['local_file_path']):
-            file_path = media_info['local_file_path']
-            await update.message.reply_text(f"Повторная отправка {message_type} из локального хранилища...")
-            
-            with open(file_path, 'rb') as file:
-                if message_type == "photo":
-                    await context.bot.send_photo(chat_id=user_id, photo=file)
-                elif message_type == "video":
-                    await context.bot.send_video(chat_id=user_id, video=file)
-                elif message_type == "voice":
-                    await context.bot.send_voice(chat_id=user_id, voice=file)
-                elif message_type == "sticker":
-                    # Для стикеров лучше использовать file_id
-                    await context.bot.send_sticker(chat_id=user_id, sticker=media_info['file_id'])
-                elif message_type == "video_note":
-                    await context.bot.send_video_note(chat_id=user_id, video_note=file)
-            
-            await update.message.reply_text(f"Медиафайл успешно отправлен из локального хранилища.\nПуть: {file_path}")
-            return
-        
-        # Если нет ни в базе, ни локально, используем file_id из Telegram
-        if media_info['file_id']:
-            await update.message.reply_text(f"Повторная отправка {message_type} через Telegram API...")
-            
-            file_id = media_info['file_id']
-            if message_type == "photo":
-                await context.bot.send_photo(chat_id=user_id, photo=file_id)
-            elif message_type == "video":
-                await context.bot.send_video(chat_id=user_id, video=file_id)
-            elif message_type == "voice":
-                await context.bot.send_voice(chat_id=user_id, voice=file_id)
-            elif message_type == "sticker":
-                await context.bot.send_sticker(chat_id=user_id, sticker=file_id)
-            elif message_type == "video_note":
-                await context.bot.send_video_note(chat_id=user_id, video_note=file_id)
-            
-            await update.message.reply_text("Медиафайл успешно отправлен через Telegram API.")
-            return
-        
-        # Если не получилось отправить медиа
-        await update.message.reply_text("Не удалось найти или отправить медиафайл.")
-        
-    except Exception as e:
-        logger.error(f"Error resending media: {e}")
-        await update.message.reply_text("Произошла ошибка при отправке медиафайла.")
-
-async def toggle_storage_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle between database and local storage mode for media files."""
-    if not update.message or not update.effective_user:
-        return
-    
-    # Проверяем, является ли пользователь администратором (можно настроить список админов)
-    user_id = update.effective_user.id
-    # Список администраторов, которые могут менять режим хранения
-    admins = [user_id]  # В данном случае любой пользователь может переключать режим для своего бота
-    
-    if user_id not in admins:
-        await update.message.reply_text("У вас нет прав для изменения режима хранения медиафайлов.")
-        return
-    
-    # Toggle the storage mode
-    state.store_media_in_db = not state.store_media_in_db
-    
-    mode_text = "базе данных" if state.store_media_in_db else "локальном хранилище"
-    await update.message.reply_text(
-        f"✅ Режим хранения медиафайлов изменен!\n\n"
-        f"📦 Новый медиаконтент теперь будет сохраняться в {mode_text}.\n\n"
-        f"📝 Примечание: это не повлияет на уже сохраненные файлы."
-    )
-
-async def import_media_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Import existing local media files into the database."""
-    if not update.message or not update.effective_user:
-        return
-    
-    # Проверяем, является ли пользователь администратором
-    user_id = update.effective_user.id
-    # Список администраторов
-    admins = [user_id]  # В данном случае любой пользователь может импортировать свои медиа
-    
-    if user_id not in admins:
-        await update.message.reply_text("У вас нет прав для импорта медиафайлов в базу данных.")
-        return
-    
-    # Проверяем, находится ли пользователь в чате
-    active_chat = await db.get_active_chat(user_id)
-    if not active_chat:
-        await update.message.reply_text("Вы не находитесь в активном чате.")
-        return
-
-    chat_id, partner_id = active_chat
-    
-    # Отправляем начальное сообщение
-    status_message = await update.message.reply_text("📥 Начинаю импорт медиафайлов в базу данных...")
-    
-    try:
-        # Получаем все медиа-сообщения в чате
-        media_messages = await db.get_chat_media(chat_id)
-        
-        if not media_messages:
-            await status_message.edit_text("В текущем чате нет медиафайлов для импорта.")
-            return
-        
-        # Счетчики
-        total_files = len(media_messages)
-        imported_files = 0
-        skipped_files = 0
-        already_in_db = 0
-        failed_files = 0
-        
-        # Обновляем статус
-        await status_message.edit_text(f"🔍 Найдено медиафайлов: {total_files}\n⏳ Импортирую...")
-        
-        # Для каждого сообщения проверяем наличие локального файла и импортируем в базу данных
-        for msg in media_messages:
-            msg_id = msg['id']
-            msg_type = msg['message_type']
-            local_path = msg['local_file_path']
-            
-            # Проверяем, есть ли уже содержимое в базе данных
-            media_content = await db.get_media_content(msg_id)
-            if media_content and media_content[0]:
-                already_in_db += 1
-                continue
-            
-            # Если есть локальный файл, импортируем его в базу данных
-            if local_path and os.path.exists(local_path):
-                try:
-                    # Определяем MIME-тип на основе типа сообщения
-                    mime_types = {
-                        "photo": "image/jpeg",
-                        "video": "video/mp4",
-                        "voice": "audio/ogg",
-                        "sticker": "image/webp",
-                        "video_note": "video/mp4"
-                    }
-                    mime_type = mime_types.get(msg_type, "application/octet-stream")
-                    
-                    # Получаем имя файла
-                    file_name = os.path.basename(local_path)
-                    
-                    # Читаем содержимое файла
-                    async with aiofiles.open(local_path, 'rb') as f:
-                        file_content = await f.read()
-                    
-                    # Сохраняем в базу данных
-                    await db.save_media_to_db(msg_id, file_content, file_name, mime_type)
-                    imported_files += 1
-                    
-                    # Периодически обновляем статус
-                    if imported_files % 5 == 0 or imported_files == 1:
-                        await status_message.edit_text(
-                            f"⏳ Импортирую медиафайлы в базу данных...\n"
-                            f"✅ Импортировано: {imported_files}/{total_files}\n"
-                            f"⏭️ Пропущено (уже в БД): {already_in_db}\n"
-                            f"❌ Ошибок: {failed_files}"
-                        )
-                except Exception as e:
-                    logger.error(f"Error importing media file to DB: {e}")
-                    failed_files += 1
-            else:
-                skipped_files += 1
-        
-        # Финальный отчет
-        result_text = (
-            f"✅ Импорт медиафайлов завершен!\n\n"
-            f"📊 Результаты:\n"
-            f"- Всего найдено: {total_files}\n"
-            f"- Успешно импортировано: {imported_files}\n"
-            f"- Уже были в базе данных: {already_in_db}\n"
-            f"- Пропущено (нет локальных файлов): {skipped_files}\n"
-            f"- Ошибок импорта: {failed_files}"
+        await update_main_message(
+            user_id,
+            context,
+            "Вы не находитесь в активном чате\\. Используйте кнопки ниже, чтобы начать поиск собеседника\\.",
+            reply_markup
         )
         
-        await status_message.edit_text(result_text)
-        
-    except Exception as e:
-        logger.error(f"Error during media import to DB: {e}")
-        await status_message.edit_text(f"❌ Произошла ошибка при импорте медиафайлов: {str(e)}")
+        # Снимаем флаг инициализации чата
+        state.chat_initialization[user_id] = False    
+        return
 
-async def init_db(application: Application) -> None:
-    """Initialize the database connection and sync data with the bot state."""
+    chat_id, partner_id = active_chat
+
     try:
-        # Get database URL from environment variables
-        database_url = os.getenv("DATABASE_URL")
-        if not database_url:
-            logger.error("Database URL not found in environment variables")
-            return
+        # Скачиваем медиафайл, если это не текстовое сообщение
+        local_file_path = None
+        file_content = None
+        file_name = None
+        mime_type = None
         
-        # Connect to the database
-        await db.connect(database_url)
+        if message_type != "text" and file_id:
+            # Получаем локальный путь, расширение, содержимое файла и MIME-тип
+            local_file_path, extension, file_content, mime_type = await download_media_file(context, file_id, message_type)
+            # Генерируем имя файла
+            file_name = f"{message_type}_{uuid.uuid4()}{extension}"
         
-        # Synchronize with database state
-        try:
-            # Get searching users from database
-            searching_users = await db.get_searching_users()
-            logger.info(f"Found {len(searching_users)} users searching for chat in database")
+        # Store message in database (все типы сообщений)
+        await db.add_message(
+            chat_id=chat_id, 
+            sender_id=user_id, 
+            content=content, 
+            message_type=message_type, 
+            file_id=file_id, 
+            local_file_path=local_file_path,
+            file_name=file_name,
+            mime_type=mime_type,
+            file_content=file_content
+        )
+        
+        # Инициализируем список сообщений для партнера, если нужно
+        if partner_id not in state.user_messages:
+            state.user_messages[partner_id] = []
+        
+        # Forward message to partner based on type
+        sent_message = None
+        
+        if message_type == "text":
+            sent_message = await context.bot.send_message(
+                chat_id=partner_id,
+                text=content
+            )
+        elif message_type == "photo":
+            sent_message = await context.bot.send_photo(
+                chat_id=partner_id,
+                photo=file_id,
+                caption=message.caption
+            )
+        elif message_type == "video":
+            sent_message = await context.bot.send_video(
+                chat_id=partner_id,
+                video=file_id,
+                caption=message.caption
+            )
+        elif message_type == "voice":
+            sent_message = await context.bot.send_voice(
+                chat_id=partner_id,
+                voice=file_id
+            )
+        elif message_type == "sticker":
+            sent_message = await context.bot.send_sticker(
+                chat_id=partner_id,
+                sticker=file_id
+            )
+        elif message_type == "video_note":
+            sent_message = await context.bot.send_video_note(
+                chat_id=partner_id,
+                video_note=file_id
+            )
+        
+        # Если сообщение успешно отправлено, добавляем его ID в список получателя
+        if sent_message:
+            logger.info(f"Successfully sent message to partner {partner_id}, message_id: {sent_message.message_id}")
             
-            # Update local state with searching users
-            for user_id in searching_users:
-                state.users_searching.add(user_id)
-                logger.info(f"User {user_id} added to local searching state")
-                
-            # Synchronize active chats
-            active_chats = await db.get_all_active_chats()
-            for user_id, partner_id in active_chats:
-                state.active_chats[user_id] = partner_id
-                state.active_chats[partner_id] = user_id
-                logger.info(f"Active chat between {user_id} and {partner_id} added to local state")
-                
-            logger.info("Database synchronization completed successfully")
+            # Устанавливаем флаг инициализации чата для партнера
+            state.chat_initialization[partner_id] = True
+            
+            state.user_messages[partner_id].append(sent_message.message_id)
+            
+            # Если это первое сообщение, полученное партнером, сохраняем его ID
+            if partner_id not in state.first_messages:
+                state.first_messages[partner_id] = sent_message.message_id
+                logger.info(f"Saved first received message {sent_message.message_id} for partner {partner_id}")
+            
+            # Снимаем флаг инициализации чата для партнера
+            state.chat_initialization[partner_id] = False
+        
+        # В конце обработки снимаем флаг инициализации чата для отправителя
+        state.chat_initialization[user_id] = False
+        
+    except Exception as e:
+        # В случае ошибки тоже снимаем флаг
+        state.chat_initialization[user_id] = False
+        logger.error(f"Error handling message from {user_id}: {e}")
+        # Отправляем сообщение об ошибке пользователю
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Произошла ошибка при отправке сообщения. Пожалуйста, попробуйте еще раз."
+        )
+
+async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View user profile."""
+    query = None
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+    elif update.message:
+        user_id = update.message.from_user.id
+    else:
+        return
+
+    # Get user profile for display
+    profile_text = await UserProfileManager.get_user_profile_text(user_id)
+ 
+    # Create keyboard for profile actions
+    keyboard = [
+        [InlineKeyboardButton("✏️ Редактировать профиль", callback_data="edit_profile")],
+        [InlineKeyboardButton("🔍 Начать поиск", callback_data="search_chat")],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data="home")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+ 
+    # Show profile - текстом без гифки
+    if query:
+        try:
+            # Удаляем предыдущее сообщение, чтобы избавиться от гифки
+            await query.message.delete()
+            
+            # Отправляем новое текстовое сообщение
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=profile_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            
+            # Сохраняем ID нового сообщения
+            state.main_message_ids[user_id] = message.message_id
         except Exception as e:
-            logger.error(f"Error synchronizing with database: {e}")
-        
-        # Reset animation_shown state at bot start
-        global animation_shown
-        animation_shown = {}
-        logger.info("Animation shown state reset")
-        
-    except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-        raise
+            logger.error(f"Error sending profile message: {e}")
+    else:
+        # Для случая, когда открывается через команду /profile
+        try:
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=profile_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            state.main_message_ids[user_id] = message.message_id
+        except Exception as e:
+            logger.error(f"Error sending profile message: {e}")
 
-async def cleanup_db(application: Application) -> None:
-    """Cleanup database connections."""
-    try:
-        await db.disconnect()
-        logger.info("Database connection closed successfully")
-    except Exception as e:
-        logger.error(f"Error closing database connection: {e}")
-
-async def reset_animation_shown(user_id: int) -> None:
-    """Reset the animation shown flag for a user."""
-    state.animation_shown[user_id] = False
-
-# Profile setup handlers
 async def setup_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start profile setup process."""
-    await UserProfileManager.setup_profile(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Update profile setup state to gender selection
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_GENDER, 1)
+    
+    # Вместо редактирования GIF-сообщения, удаляем его и отправляем новое текстовое сообщение
+    try:
+        await query.message.delete()
+        # Отправляем новое сообщение с выбором пола
+        await UserProfileManager.send_gender_selection(user_id, context)
+    except Exception as e:
+        logger.error(f"Error deleting onboarding message: {e}")
+        # Пробуем отправить новое сообщение в любом случае
+        await UserProfileManager.send_gender_selection(user_id, context)
 
 async def skip_profile_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Skip profile setup and return to main menu."""
+    """Skip profile setup and go to main menu."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Mark profile setup as complete
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_COMPLETE, 5)
+    
+    # Удаляем старое сообщение с GIF
+    try:
+        await query.message.delete()
+        
+        # Отправляем новое сообщение с главным меню и GIF
+        message = await context.bot.send_animation(
+            chat_id=user_id,
+            animation=MAIN_MENU_GIF,
+            caption=MAIN_MENU_TEXT,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+        )
+        
+        # Сохраняем ID сообщения
+        state.main_message_ids[user_id] = message.message_id
+    except Exception as e:
+        logger.error(f"Error in skip_profile_setup: {e}")
+        # В случае ошибки отправляем текстовое сообщение
+        try:
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+            )
+            state.main_message_ids[user_id] = message.message_id
+        except Exception as e2:
+            logger.error(f"Error sending fallback main menu: {e2}")
+
+async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set user gender in profile setup."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract gender from callback data
+    gender = query.data.split('_')[1]
+    
+    # Save gender in database
+    await db.save_user_profile(user_id, gender=gender)
+    
+    # Update profile setup state to looking for selection
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_LOOKING_FOR, 2)
+    
+    # Show looking for selection menu by editing the existing message
+    await UserProfileManager.send_looking_for_selection(user_id, context, query=query, edit_message=True)
+
+async def set_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set looking for preference in profile setup."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract looking for preference from callback data
+    looking_for = query.data.split('_')[2]
+    
+    # Save looking for preference in database
+    await db.save_user_profile(user_id, looking_for=looking_for)
+    
+    # Update profile setup state to age selection
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_AGE, 3)
+    
+    # Show age selection menu by editing the existing message
+    await UserProfileManager.send_age_selection(user_id, context, query=query, edit_message=True)
+
+async def handle_age_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle age selection in profile setup."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Extract age from callback data
+    age_data = query.data.split('_')[1]
+    age = 50 if age_data == "50plus" else int(age_data)
+    
+    # Save age in database
+    await db.save_user_profile(user_id, age=age)
+    
+    # Update profile setup state to interests selection
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_INTERESTS, 4)
+    
+    # Show interests selection menu by editing the existing message
+    await UserProfileManager.send_interests_selection(user_id, context, query=query, edit_message=True)
+
+async def toggle_interest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle selection of an interest."""
     query = update.callback_query
     if not query or not query.from_user:
         return
@@ -2278,846 +1995,750 @@ async def skip_profile_setup(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     user_id = query.from_user.id
     
-    # Mark profile setup as skipped
-    await db.update_profile_setup_state(user_id, PROFILE_SETUP_NONE, 0)
+    # Extract interest name from callback data
+    callback_data = query.data
+    if callback_data.startswith("toggle_interest_"):
+        interest_name = callback_data.replace("toggle_interest_", "")
+    elif callback_data.startswith("interest_"):
+        interest_name = callback_data.replace("interest_", "")
+    else:
+        logger.error(f"Unexpected callback data format: {callback_data}")
+        return
     
-    # Show main menu with animation
-    await send_main_menu_with_animation(user_id, context)
-
-async def set_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle gender selection in profile setup."""
-    await UserProfileManager.handle_gender_selection(update, context)
-
-async def set_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle looking for selection in profile setup."""
-    await UserProfileManager.handle_looking_for_selection(update, context)
-
-async def handle_age_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle age selection in profile setup."""
-    await UserProfileManager.handle_age_selection(update, context)
-
-async def toggle_interest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle selection of an interest."""
-    await UserProfileManager.toggle_interest(update, context)
+    # Get current user interests
+    user_interests = await db.get_user_interests(user_id)
+    
+    if interest_name in user_interests:
+        # If already selected, remove it
+        await db.remove_user_interest(user_id, interest_name)
+    else:
+        # If not selected, add it
+        await db.save_user_interest(user_id, interest_name)
+    
+    # Get setup state
+    profile_state, _ = await db.get_profile_setup_state(user_id)
+    is_edit = profile_state == PROFILE_SETUP_COMPLETE
+    
+    # Refresh interests menu by editing the current message
+    await UserProfileManager.send_interests_selection(user_id, context, is_edit, query=query, edit_message=True)
 
 async def complete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Complete profile setup."""
-    await UserProfileManager.complete_profile(update, context)
+    """Complete the profile setup process."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
 
-async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View user profile."""
-    await UserProfileManager.view_profile(update, context)
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Mark profile setup as complete
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_COMPLETE, 5)
+    
+    # Удаляем сообщение с выбором интересов
+    try:
+        await query.message.delete()
+        
+        # Отправляем новое сообщение с главным меню и GIF
+        message = await context.bot.send_animation(
+            chat_id=user_id,
+            animation=MAIN_MENU_GIF,
+            caption=MAIN_MENU_TEXT,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+        )
+        
+        # Сохраняем ID сообщения
+        state.main_message_ids[user_id] = message.message_id
+    except Exception as e:
+        logger.error(f"Error sending main menu after profile completion: {e}")
+        # В случае ошибки отправляем текстовое сообщение
+        try:
+            message = await context.bot.send_message(
+                chat_id=user_id,
+                text=MAIN_MENU_TEXT,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(MAIN_MENU_KEYBOARD)
+            )
+            state.main_message_ids[user_id] = message.message_id
+        except Exception as e2:
+            logger.error(f"Error sending fallback main menu: {e2}")
 
 async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Edit user profile."""
-    await UserProfileManager.edit_profile(update, context)
+    """Show profile edit menu."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+ 
+    # Create keyboard for profile edit options
+    keyboard = [
+        [InlineKeyboardButton("👤 Изменить пол", callback_data="edit_gender")],
+        [InlineKeyboardButton("🔍 Изменить предпочтения", callback_data="edit_looking_for")],
+        [InlineKeyboardButton("🔢 Изменить возраст", callback_data="edit_age")],
+        [InlineKeyboardButton("🏷️ Изменить интересы", callback_data="edit_interests")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="view_profile")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Текст для редактирования профиля
+    text = "*Редактирование профиля*\n\n" \
+           "Выберите, что вы хотите изменить в вашем профиле:"
+    
+    # Удаляем предыдущее сообщение с профилем
+    try:
+        await query.message.delete()
+        
+        # Отправляем новое текстовое сообщение
+        message = await context.bot.send_message(
+            chat_id=user_id,
+            text=text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+        
+        # Сохраняем ID нового сообщения
+        state.main_message_ids[user_id] = message.message_id
+    except Exception as e:
+        logger.error(f"Error sending edit profile message: {e}")
+        # В случае ошибки пробуем редактировать существующее сообщение
+        try:
+            await query.edit_message_text(
+                text=text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e2:
+            logger.error(f"Error editing message for edit profile menu: {e2}")
 
 async def edit_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Edit gender in profile."""
-    await UserProfileManager.edit_gender(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Show gender selection menu in edit mode
+    await UserProfileManager.send_gender_selection(user_id, context, is_edit=True, query=query)
 
 async def edit_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Edit looking for preference in profile."""
-    await UserProfileManager.edit_looking_for(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Show looking for preference selection menu in edit mode
+    await UserProfileManager.send_looking_for_selection(user_id, context, is_edit=True, query=query)
 
 async def edit_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Edit age in profile."""
-    await UserProfileManager.edit_age(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
 
-async def save_age_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Save age edit in profile."""
-    await UserProfileManager.save_age_edit(update, context)
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Show age selection menu in edit mode
+    await UserProfileManager.send_age_selection(user_id, context, is_edit=True, query=query)
 
 async def edit_interests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Edit interests in profile."""
-    await UserProfileManager.edit_interests(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    await query.answer()
+    user_id = query.from_user.id
+    
+    # Show interests selection menu in edit mode
+    await UserProfileManager.send_interests_selection(user_id, context, is_edit=True, query=query)
 
 async def save_gender_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Save gender edit in profile."""
-    await UserProfileManager.save_gender_edit(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+
+    # Extract gender from callback data
+    gender = query.data.split('_')[2]
+    
+    # Save gender in database
+    await db.save_user_profile(user_id, gender=gender)
+    
+    # Show confirmation message
+    try:
+        await query.message.delete()
+        
+        # Return to profile edit menu
+        await edit_profile(update, context)
+        
+    except Exception as e:
+        logger.error(f"Error after saving gender: {e}")
+        # Try to just edit the message
+        try:
+            # Create keyboard for profile edit options
+            keyboard = [
+                [InlineKeyboardButton("👤 Изменить пол", callback_data="edit_gender")],
+                [InlineKeyboardButton("🔍 Изменить предпочтения", callback_data="edit_looking_for")],
+                [InlineKeyboardButton("🔢 Изменить возраст", callback_data="edit_age")],
+                [InlineKeyboardButton("🏷️ Изменить интересы", callback_data="edit_interests")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="view_profile")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Текст для редактирования профиля
+            text = "*Редактирование профиля*\n\n" \
+                   "✅ Пол успешно изменен!\n\n" \
+                   "Выберите, что вы хотите изменить в вашем профиле:"
+            
+            await query.edit_message_text(
+                text=text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e2:
+            logger.error(f"Error editing message after gender save: {e2}")
 
 async def save_looking_for_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Save looking for preference edit in profile."""
-    await UserProfileManager.save_looking_for_edit(update, context)
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+
+    # Extract looking_for preference from callback data
+    looking_for = query.data.split('_')[3]
+    
+    # Save looking_for preference in database
+    await db.save_user_profile(user_id, looking_for=looking_for)
+    
+    # Show confirmation message
+    try:
+        await query.message.delete()
+        
+        # Return to profile edit menu
+        await edit_profile(update, context)
+        
+    except Exception as e:
+        logger.error(f"Error after saving looking_for: {e}")
+        # Try to just edit the message
+        try:
+            # Create keyboard for profile edit options
+            keyboard = [
+                [InlineKeyboardButton("👤 Изменить пол", callback_data="edit_gender")],
+                [InlineKeyboardButton("🔍 Изменить предпочтения", callback_data="edit_looking_for")],
+                [InlineKeyboardButton("🔢 Изменить возраст", callback_data="edit_age")],
+                [InlineKeyboardButton("🏷️ Изменить интересы", callback_data="edit_interests")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="view_profile")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Текст для редактирования профиля
+            text = "*Редактирование профиля*\n\n" \
+                   "✅ Предпочтения успешно изменены!\n\n" \
+                   "Выберите, что вы хотите изменить в вашем профиле:"
+            
+            await query.edit_message_text(
+                text=text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e2:
+            logger.error(f"Error editing message after looking_for save: {e2}")
+
+async def save_age_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save age edit in profile."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+    
+    await query.answer()
+    user_id = query.from_user.id
+
+    # Extract age from callback data
+    age_data = query.data.split('_')[2]
+    age = 50 if age_data == "50plus" else int(age_data)
+    
+    # Save age in database
+    await db.save_user_profile(user_id, age=age)
+    
+    # Show confirmation message
+    try:
+        await query.message.delete()
+        
+        # Return to profile edit menu
+        await edit_profile(update, context)
+        
+    except Exception as e:
+        logger.error(f"Error after saving age: {e}")
+        # Try to just edit the message
+        try:
+            # Create keyboard for profile edit options
+            keyboard = [
+                [InlineKeyboardButton("👤 Изменить пол", callback_data="edit_gender")],
+                [InlineKeyboardButton("🔍 Изменить предпочтения", callback_data="edit_looking_for")],
+                [InlineKeyboardButton("🔢 Изменить возраст", callback_data="edit_age")],
+                [InlineKeyboardButton("🏷️ Изменить интересы", callback_data="edit_interests")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="view_profile")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Текст для редактирования профиля
+            text = "*Редактирование профиля*\n\n" \
+                   "✅ Возраст успешно изменен!\n\n" \
+                   "Выберите, что вы хотите изменить в вашем профиле:"
+            
+            await query.edit_message_text(
+                text=text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e2:
+            logger.error(f"Error editing message after age save: {e2}")
+
+async def media_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show media statistics."""
+    # Сюда добавить код показа статистики по медиа
+    pass
+
+async def resend_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Resend media from history."""
+    # Сюда добавить код повторной отправки медиа
+    pass
+
+async def toggle_storage_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle between storing media in DB or on disk."""
+    if not update.message or not update.effective_user:
+        return
+        
+    user_id = update.effective_user.id
+    
+    # Check if user is admin (better to implement proper admin check)
+    
+    # Toggle the storage mode
+    state.store_media_in_db = not state.store_media_in_db
+    
+    # Inform about the current mode
+    mode_text = "в базе данных" if state.store_media_in_db else "на диске в папке /media"
+    await update.message.reply_text(
+        f"Режим хранения медиафайлов изменен. Текущий режим: {mode_text}.\n\n"
+        f"Сообщения всегда сохраняются в базе данных."
+    )
+    
+    logger.info(f"Storage mode toggled to: {'DB' if state.store_media_in_db else 'DISK'}")
+
+async def import_media_to_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Import media from disk to database."""
+    # Сюда добавить код импорта медиа с диска в базу данных
+    pass
+
+async def init_db(application: Application) -> None:
+    """Initialize database connection."""
+    # Сюда добавить код инициализации базы данных
+    pass
+
+async def cleanup_db(application: Application) -> None:
+    """Close database connection."""
+    # Сюда добавить код закрытия соединения с базой данных
+    pass
 
 class UserProfileManager:
-    """
-    Class to manage user profiles, including setup, editing, and viewing.
-    """
+    """Class to manage user profile operations."""
     
     @staticmethod
     async def get_user_profile_text(user_id: int) -> str:
-        """
-        Get a formatted text representation of a user's profile.
+        """Get formatted profile text for display."""
+        # Получаем профиль пользователя из базы данных
+        user_profile = await db.get_user_profile(user_id)
+        user_interests = await db.get_user_interests(user_id)
         
-        Args:
-            user_id: The Telegram user ID
-            
-        Returns:
-            Formatted profile text for display
-        """
-        profile = await db.get_user_profile(user_id)
-        interests = await db.get_user_interests(user_id)
+        if not user_profile:
+            return "*Ваш профиль*\n\nПрофиль не заполнен\\."
         
-        if not profile:
-            return "Профиль не настроен\\."
-        
-        profile_text = "*👤 Ваш профиль*\n\n"
+        profile_text = "*Ваш профиль*\n\n"
         
         # Gender
-        if profile.get('gender'):
+        if user_profile.get('gender'):
             gender_text = {
                 'male': "👨 Мужской",
                 'female': "👩 Женский",
                 'other': "🧑 Другой"
-            }.get(profile['gender'], "Не указан")
+            }.get(user_profile['gender'], "Не указан")
             profile_text += f"• *Пол:* {gender_text}\n"
-        else:
-            profile_text += f"• *Пол:* Не указан\n"
         
+        # Age
+        if user_profile.get('age'):
+            profile_text += f"• *Возраст:* {user_profile['age']}\n"
+            
         # Looking for
-        if profile.get('looking_for'):
+        if user_profile.get('looking_for'):
             looking_for_text = {
                 'male': "👨 Мужской",
                 'female': "👩 Женский",
                 'any': "👥 Любой"
-            }.get(profile['looking_for'], "Не указано")
-            profile_text += f"• *Ищу:* {looking_for_text}\n"
-        else:
-            profile_text += f"• *Ищу:* Не указано\n"
-        
-        # Age
-        if profile.get('age'):
-            profile_text += f"• *Возраст:* {profile['age']}\n"
-        else:
-            profile_text += f"• *Возраст:* Не указан\n"
+            }.get(user_profile['looking_for'], "Не указано")
+            profile_text += f"• *Ищет:* {looking_for_text}\n"
         
         # Interests
-        if interests:
-            interests_text = "\n".join([f"  • {interest}" for interest in interests])
-            profile_text += f"• *Интересы:*\n{interests_text}"
-        else:
-            profile_text += f"• *Интересы:* Не указаны"
+        if user_interests:
+            # Экранируем специальные символы для MarkdownV2
+            escaped_interests = [interest.replace('.', '\\.').replace('-', '\\-').replace('!', '\\!').replace('(', '\\(').replace(')', '\\)') for interest in user_interests]
+            profile_text += f"• *Интересы:* {', '.join(escaped_interests)}"
         
         return profile_text
     
     @staticmethod
-    async def send_gender_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send gender selection menu to user.
+    async def send_gender_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query=None, edit_message=False) -> None:
+        """Send gender selection menu."""
+        # Create keyboard for gender selection
+        if is_edit:
+            keyboard = [
+                [InlineKeyboardButton("👨 Мужской", callback_data="gender_edit_male")],
+                [InlineKeyboardButton("👩 Женский", callback_data="gender_edit_female")],
+                [InlineKeyboardButton("🧑 Другой", callback_data="gender_edit_other")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")]
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("👨 Мужской", callback_data="gender_male")],
+                [InlineKeyboardButton("👩 Женский", callback_data="gender_female")],
+                [InlineKeyboardButton("🧑 Другой", callback_data="gender_other")]
+            ]
         
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        buttons = [
-            [
-                InlineKeyboardButton("👨 Мужской", callback_data=f"{'gender_edit' if is_edit else 'gender'}_male"),
-                InlineKeyboardButton("👩 Женский", callback_data=f"{'gender_edit' if is_edit else 'gender'}_female")
-            ],
-            [InlineKeyboardButton("🧑 Другой", callback_data=f"{'gender_edit' if is_edit else 'gender'}_other")]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = "*Укажите ваш пол*\n\n" \
+               "Этот параметр будет виден всем вашим собеседникам\\."
+        
+        # If editing or requested to edit the message
+        if (is_edit or edit_message) and query:
+            try:
+                # If we need to edit the message instead of deleting it
+                if edit_message:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state if needed
+                    if query.message:
+                        state.main_message_ids[user_id] = query.message.message_id
+                else:
+                    # Delete the previous message if needed
+                    await query.message.delete()
+                    message = await context.bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state
+                    state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending gender selection message: {e}")
+                # Fallback to edit the message
+                try:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                except Exception as e2:
+                    logger.error(f"Error editing message for gender selection: {e2}")
+        else:
+            # For initial setup, send a new message
+            try:
+                message = await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+                # Save message ID in state
+                state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending gender selection message: {e}")
+    
+    @staticmethod
+    async def send_looking_for_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query=None, edit_message=False) -> None:
+        """Send looking for selection menu."""
+        # Create keyboard for looking for preference selection
+        if is_edit:
+            keyboard = [
+                [InlineKeyboardButton("👨 Мужской", callback_data="looking_for_edit_male")],
+                [InlineKeyboardButton("👩 Женский", callback_data="looking_for_edit_female")],
+                [InlineKeyboardButton("👥 Любой", callback_data="looking_for_edit_any")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")]
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton("👨 Мужской", callback_data="looking_for_male")],
+                [InlineKeyboardButton("👩 Женский", callback_data="looking_for_female")],
+                [InlineKeyboardButton("👥 Любой", callback_data="looking_for_any")]
+            ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = "*Кого вы ищете?*\n\n" \
+               "Укажите пол предпочитаемых собеседников\\."
+        
+        # If editing or requested to edit the message
+        if (is_edit or edit_message) and query:
+            try:
+                # If we need to edit the message instead of deleting it
+                if edit_message:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state if needed
+                    if query.message:
+                        state.main_message_ids[user_id] = query.message.message_id
+                else:
+                    # Delete the previous message if needed
+                    await query.message.delete()
+                    message = await context.bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state
+                    state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending looking_for selection message: {e}")
+                # Fallback to edit the message
+                try:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                except Exception as e2:
+                    logger.error(f"Error editing message for looking_for selection: {e2}")
+        else:
+            # For initial setup, send a new message
+            try:
+                message = await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+                # Save message ID in state
+                state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending looking_for selection message: {e}")
+    
+    @staticmethod
+    async def send_age_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query=None, edit_message=False) -> None:
+        """Send age selection menu."""
+        # Create keyboard for age selection
+        keyboard = []
+        
+        # Create rows of age options (3 per row)
+        age_options = []
+        for age in range(18, 50, 5):
+            row = []
+            for i in range(5):
+                current_age = age + i
+                if current_age >= 50:
+                    break
+                    
+                if is_edit:
+                    callback_data = f"age_edit_{current_age}"
+                else:
+                    callback_data = f"age_{current_age}"
+                    
+                row.append(InlineKeyboardButton(f"{current_age}", callback_data=callback_data))
+                
+            if row:
+                keyboard.append(row)
+        
+        # Add 50+ option and back button
+        if is_edit:
+            keyboard.append([InlineKeyboardButton("50+", callback_data="age_edit_50plus")])
+            keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
+        else:
+            keyboard.append([InlineKeyboardButton("50+", callback_data="age_50plus")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = "*Укажите ваш возраст*\n\n" \
+               "Этот параметр будет виден всем вашим собеседникам\\."
+        
+        # If editing or requested to edit the message
+        if (is_edit or edit_message) and query:
+            try:
+                # If we need to edit the message instead of deleting it
+                if edit_message:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state if needed
+                    if query.message:
+                        state.main_message_ids[user_id] = query.message.message_id
+                else:
+                    # Delete the previous message if needed
+                    await query.message.delete()
+                    message = await context.bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state
+                    state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending age selection message: {e}")
+                # Fallback to edit the message
+                try:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                except Exception as e2:
+                    logger.error(f"Error editing message for age selection: {e2}")
+        else:
+            # For initial setup, send a new message
+            try:
+                message = await context.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+                # Save message ID in state
+                state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending age selection message: {e}")
+    
+    @staticmethod
+    async def send_interests_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query=None, edit_message=False) -> None:
+        """Send interests selection menu."""
+        # Default list of available interests
+        available_interests = [
+            "🗣️ Общение", "💋 Флирт", "🔥 Темки"
         ]
         
-        if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
-        
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        text = "*Выберите ваш пол:*\n\n" \
-               "Это поможет в поиске подходящего собеседника\\."
-
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
-    
-    @staticmethod
-    async def send_looking_for_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send looking for preference selection menu to user.
-        
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        buttons = [
-            [
-                InlineKeyboardButton("👨 Мужской", callback_data=f"{'looking_for_edit' if is_edit else 'looking_for'}_male"),
-                InlineKeyboardButton("👩 Женский", callback_data=f"{'looking_for_edit' if is_edit else 'looking_for'}_female")
-            ],
-            [InlineKeyboardButton("👥 Любой", callback_data=f"{'looking_for_edit' if is_edit else 'looking_for'}_any")]
-        ]
-        
-        if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
-        
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        text = "*Кого вы ищете для общения?*\n\n" \
-               "Выберите предпочитаемый пол собеседника\\."
-
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
-    
-    @staticmethod
-    async def send_age_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send age selection menu to user.
-        
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        # Create age buttons in rows of 5 buttons each
-        buttons = []
-        current_row = []
-        
-        for age in range(18, 51):
-            current_row.append(
-                InlineKeyboardButton(str(age), callback_data=f"{'age_edit' if is_edit else 'age'}_{age}")
-            )
-            
-            if len(current_row) == 5:
-                buttons.append(current_row)
-                current_row = []
-        
-        # Add any remaining buttons
-        if current_row:
-            buttons.append(current_row)
-        
-        # Add 50+ option
-        buttons.append([InlineKeyboardButton("50+", callback_data=f"{'age_edit' if is_edit else 'age'}_50plus")])
-        
-        if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
-        
-        keyboard = InlineKeyboardMarkup(buttons)
-        
-        text = "*Укажите ваш возраст:*\n\n" \
-               "Это поможет найти собеседника вашей возрастной группы\\."
-
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
-    
-    @staticmethod
-    async def send_interests_selection(user_id: int, context: ContextTypes.DEFAULT_TYPE, is_edit: bool = False, query = None) -> None:
-        """
-        Send interests selection menu to user.
-        
-        Args:
-            user_id: Telegram user ID
-            context: Telegram context
-            is_edit: Whether this is during profile edit (True) or setup (False)
-            query: Optional callback query for editing message
-        """
-        # Get available interests from database
-        all_interests = await db.get_all_interests()
+        # Fetch user's current interests
         user_interests = await db.get_user_interests(user_id)
         
-        # Create buttons for interests
-        buttons = []
-        
-        for interest in all_interests:
-            interest_name = interest['name']
-            is_selected = interest_name in user_interests
+        # Create keyboard
+        keyboard = []
+        for interest in available_interests:
+            # Check if this interest is already selected by the user
+            is_selected = interest in user_interests
             
-            # Create button text with checkmark if selected
-            button_text = f"{'✅' if is_selected else '❌'} {interest_name}"
+            # Format the button text to indicate selection
+            button_text = f"✅ {interest}" if is_selected else f"☑️ {interest}"
             
-            # Create button with callback data for toggling
-            buttons.append([InlineKeyboardButton(
-                button_text, 
-                callback_data=f"toggle_interest_{interest_name}"
-            )])
+            # Create callback data
+            callback_data = f"toggle_interest_{interest}"
+            
+            # Add button to keyboard
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
-        # Add buttons for completing or going back
+        # Add completion or back button
         if is_edit:
-            buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="edit_profile")])
+            keyboard.append([InlineKeyboardButton("🔙 Готово", callback_data="edit_profile")])
         else:
-            buttons.append([InlineKeyboardButton("✅ Готово", callback_data="complete_profile")])
+            keyboard.append([InlineKeyboardButton("✅ Завершить настройку", callback_data="complete_profile")])
         
-        keyboard = InlineKeyboardMarkup(buttons)
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
-        text = "*Выберите ваши интересы:*\n\n" \
-               "Нажмите на интересы, чтобы выбрать их\\. Нажмите повторно, чтобы отменить выбор\\.\n\n" \
-               f"Выбрано: {len(user_interests) if user_interests else 0}"
-
-        if query:
+        # Format instructions text
+        selected_count = len(user_interests) if user_interests else 0
+        
+        if is_edit:
+            title = "*Редактирование интересов*"
+        else:
+            title = "*Выберите ваши интересы*"
+        
+        text = f"{title}\n\n" \
+               f"Выбрано интересов: {selected_count}\n\n" \
+               "Нажмите на интерес, чтобы добавить/убрать его из своего профиля\\. " \
+               "Интересы будут видны вашим собеседникам и помогут найти людей с похожими увлечениями\\."
+        
+        # If editing or requested to edit the message
+        if (is_edit or edit_message) and query:
             try:
-                await query.edit_message_text(
+                # If we need to edit the message instead of deleting it
+                if edit_message:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state if needed
+                    if query.message:
+                        state.main_message_ids[user_id] = query.message.message_id
+                else:
+                    # Delete the previous message if needed
+                    await query.message.delete()
+                    message = await context.bot.send_message(
+                        chat_id=user_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                    # Save message ID in state
+                    state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending interests selection message: {e}")
+                # Try to edit the message instead
+                try:
+                    await query.edit_message_text(
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                except Exception as e2:
+                    logger.error(f"Error editing message for interests selection: {e2}")
+        else:
+            # For initial setup, send a new message
+            try:
+                message = await context.bot.send_message(
+                    chat_id=user_id,
                     text=text,
-                    reply_markup=keyboard,
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
                 )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    await query.edit_message_caption(
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                text,
-                keyboard
-            )
-    
-    @staticmethod
-    async def setup_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Start the profile setup process.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
+                # Save message ID in state
+                state.main_message_ids[user_id] = message.message_id
+            except Exception as e:
+                logger.error(f"Error sending interests selection message: {e}")
 
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Set user as being in gender selection state
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_GENDER, 1)
-        
-        # Show gender selection menu
-        await UserProfileManager.send_gender_selection(user_id, context)
-    
-    @staticmethod
-    async def handle_gender_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle gender selection in profile setup.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-    
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract gender from callback data
-        gender = query.data.split('_')[1]
-        
-        # Save gender in database
-        await db.save_user_profile(user_id, gender=gender)
-        
-        # Update profile setup state to looking for selection
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_LOOKING_FOR, 2)
-        
-        # Show looking for selection menu
-        await UserProfileManager.send_looking_for_selection(user_id, context)
-    
-    @staticmethod
-    async def handle_looking_for_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle looking for selection in profile setup.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-    
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract looking for preference from callback data
-        looking_for = query.data.split('_')[1]
-        
-        # Save looking for preference in database
-        await db.save_user_profile(user_id, looking_for=looking_for)
-        
-        # Update profile setup state to age selection
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_AGE, 3)
-        
-        # Show age selection menu
-        await UserProfileManager.send_age_selection(user_id, context)
-    
-    @staticmethod
-    async def handle_age_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Handle age selection in profile setup.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract age from callback data
-        age_data = query.data.split('_')[1]
-        age = 50 if age_data == "50plus" else int(age_data)
-        
-        # Save age in database
-        await db.save_user_profile(user_id, age=age)
-        
-        # Update profile setup state to interests selection
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_INTERESTS, 4)
-        
-        # Show interests selection menu
-        await UserProfileManager.send_interests_selection(user_id, context)
-    
-    @staticmethod
-    async def toggle_interest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Toggle selection of an interest.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract interest name from callback data
-        callback_data = query.data
-        if callback_data.startswith("toggle_interest_"):
-            interest_name = callback_data.replace("toggle_interest_", "")
-        elif callback_data.startswith("interest_"):
-            interest_name = callback_data.replace("interest_", "")
-        else:
-            logger.error(f"Unexpected callback data format: {callback_data}")
-            return
-        
-        # Get current user interests
-        user_interests = await db.get_user_interests(user_id)
-        
-        if interest_name in user_interests:
-            # If already selected, remove it
-            await db.remove_user_interest(user_id, interest_name)
-        else:
-            # If not selected, add it
-            await db.save_user_interest(user_id, interest_name)
-        
-        # Get setup state
-        profile_state, _ = await db.get_profile_setup_state(user_id)
-        is_edit = profile_state != PROFILE_SETUP_INTERESTS
-        
-        # Refresh interests menu
-        await UserProfileManager.send_interests_selection(user_id, context, is_edit, query=query)
-    
-    @staticmethod
-    async def complete_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Complete the profile setup process.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Mark profile setup as complete
-        await db.update_profile_setup_state(user_id, PROFILE_SETUP_COMPLETE, 5)
-        
-        # Отправляем главное меню с гифкой
-        await send_main_menu_with_animation(user_id, context)
-    
-    @staticmethod
-    async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        View user profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = None
-        if update.callback_query:
-            query = update.callback_query
-            await query.answer()
-            user_id = query.from_user.id
-        elif update.message:
-            user_id = update.message.from_user.id
-        else:
-            return
+async def save_interests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save user interests and continue to complete profile."""
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
 
-        # Get user profile for display
-        profile_text = await UserProfileManager.get_user_profile_text(user_id)
+    await query.answer()
+    user_id = query.from_user.id
     
-        # Create keyboard for profile actions
-        keyboard = [
-            [InlineKeyboardButton("✏️ Редактировать профиль", callback_data="edit_profile")],
-            [InlineKeyboardButton("🔍 Начать поиск", callback_data="search_chat")],
-            [InlineKeyboardButton("🏠 Главное меню", callback_data="home")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    # Update profile setup state to complete
+    await db.update_profile_setup_state(user_id, PROFILE_SETUP_COMPLETE, 5)
     
-        # Show profile
-        if query:
-            try:
-                await query.edit_message_text(
-                    text=profile_text,
-                    reply_markup=reply_markup,
-                    parse_mode="MarkdownV2"
-                )
-            except telegram.error.BadRequest as e:
-                if "There is no text in the message to edit" in str(e):
-                    # Если сообщение содержит анимацию, редактируем caption
-                    await query.edit_message_caption(
-                        caption=profile_text,
-                        reply_markup=reply_markup,
-                        parse_mode="MarkdownV2"
-                    )
-                else:
-                    raise
-        else:
-            await update_main_message(
-                user_id,
-                context,
-                profile_text,
-                reply_markup
-            )
-    
-    @staticmethod
-    async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Show profile edit menu.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-
-        await query.answer()
-        user_id = query.from_user.id
-    
-        # Create keyboard for profile edit options
-        keyboard = [
-            [InlineKeyboardButton("👤 Изменить пол", callback_data="edit_gender")],
-            [InlineKeyboardButton("🔍 Изменить предпочтения", callback_data="edit_looking_for")],
-            [InlineKeyboardButton("🔢 Изменить возраст", callback_data="edit_age")],
-            [InlineKeyboardButton("🏷️ Изменить интересы", callback_data="edit_interests")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="view_profile")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-    
-        # Show edit options
-        try:
-            await query.edit_message_text(
-                text="*Редактирование профиля*\n\n"
-                     "Выберите, что вы хотите изменить в вашем профиле:",
-                reply_markup=reply_markup,
-                parse_mode="MarkdownV2"
-            )
-        except telegram.error.BadRequest as e:
-            if "There is no text in the message to edit" in str(e):
-                # Если сообщение содержит анимацию, редактируем caption
-                await query.edit_message_caption(
-                    caption="*Редактирование профиля*\n\n"
-                           "Выберите, что вы хотите изменить в вашем профиле:",
-                    reply_markup=reply_markup,
-                    parse_mode="MarkdownV2"
-                )
-            else:
-                raise
-    
-    @staticmethod
-    async def edit_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit gender in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Show gender selection menu in edit mode
-        await UserProfileManager.send_gender_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def edit_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit looking for preference in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Show looking for selection menu in edit mode
-        await UserProfileManager.send_looking_for_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def edit_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit age in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Show age selection menu in edit mode
-        await UserProfileManager.send_age_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def edit_interests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Edit interests in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-    
-        await query.answer()
-        user_id = query.from_user.id
-
-        # Show interests selection menu in edit mode
-        await UserProfileManager.send_interests_selection(user_id, context, is_edit=True, query=query)
-    
-    @staticmethod
-    async def save_gender_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Save gender edit in profile.
-
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-    
-    # Extract gender from callback data
-        gender = query.data.split('_')[2]
-    
-        # Save gender in database
-        await db.save_user_profile(user_id, gender=gender)
-    
-        # Return to profile edit menu
-        await UserProfileManager.edit_profile(update, context)
-    
-    @staticmethod
-    async def save_looking_for_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Save looking for preference edit in profile.
-
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-    
-        await query.answer()
-        user_id = query.from_user.id
-    
-        # Extract looking for preference from callback data
-        looking_for = query.data.split('_')[2]
-        
-        # Save looking for preference in database
-        await db.save_user_profile(user_id, looking_for=looking_for)
-    
-        # Return to profile edit menu
-        await UserProfileManager.edit_profile(update, context)
-    
-    @staticmethod
-    async def save_age_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """
-        Save age edit in profile.
-        
-        Args:
-            update: Telegram update
-            context: Telegram context
-        """
-        query = update.callback_query
-        if not query or not query.from_user:
-            return
-        
-        await query.answer()
-        user_id = query.from_user.id
-        
-        # Extract age from callback data
-        age_data = query.data.split('_')[2]
-        age = 50 if age_data == "50plus" else int(age_data)
-        
-        # Save age in database
-        await db.save_user_profile(user_id, age=age)
-        
-        # Return to profile edit menu
-        await UserProfileManager.edit_profile(update, context)
-
-# Словарь для отслеживания, была ли показана гифка пользователю
-animation_shown = {}
-
-async def send_main_menu_with_animation(
-    user_id: int, 
-    context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """
-    Send animation and main menu message for a user.
-    The animation is shown only once per session, while the menu message
-    is created for editing in subsequent interactions.
-    
-    Args:
-        user_id: Telegram user ID
-        context: Telegram bot context
-    """
-    try:
-        # Создаем клавиатуру
-        keyboard = MAIN_MENU_KEYBOARD
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Очищаем предыдущие сообщения
-        await delete_messages(user_id, context)
-        
-        # Проверяем, показывали ли мы анимацию этому пользователю
-        if user_id not in state.animation_shown or not state.animation_shown[user_id]:
-            # URL гифки
-            animation_url = "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExbTB1ZWRwaGpiNW1vd3dpdzZoNnBweTRqYWNsODlmaHE4M2l0aXRndCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/gdcnaVs40BdrmV62g8/giphy.gif"
-            
-            # Отправляем анимацию с текстом меню
-            message = await context.bot.send_animation(
-                chat_id=user_id,
-                animation=animation_url,
-                caption=MAIN_MENU_TEXT,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-            
-            # Помечаем, что анимация показана
-            state.animation_shown[user_id] = True
-            
-            # Сохраняем ID сообщения с анимацией как главное сообщение
-            state.main_message_ids[user_id] = message.message_id
-            await db.update_main_message_id(user_id, message.message_id)
-            
-            # Добавляем в список сообщений пользователя
-            if user_id not in state.user_messages:
-                state.user_messages[user_id] = []
-            state.user_messages[user_id].append(message.message_id)
-        else:
-            # Если анимация уже была показана, просто отправляем текстовое сообщение с меню
-            await update_main_message(
-                user_id,
-                context,
-                MAIN_MENU_TEXT,
-                reply_markup
-            )
-    except Exception as e:
-        logger.error(f"Error sending main menu with animation: {e}")
+    # Complete the profile setup
+    await complete_profile(update, context)
 
 def main() -> None:
     """Start the bot."""
@@ -3157,8 +2778,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cancel_search, pattern="^cancel_search$"))
     application.add_handler(CallbackQueryHandler(stop_chat_new, pattern="^stop_chat$"))
     application.add_handler(CallbackQueryHandler(skip_chat_new, pattern="^skip_chat$"))
-    application.add_handler(CallbackQueryHandler(start, pattern="^start$"))  # Добавляем обработчик для кнопки "Главное меню"
-    application.add_handler(CallbackQueryHandler(home_command, pattern="^home$"))  # Добавляем обработчик для кнопки "Главное меню" в профиле
+    application.add_handler(CallbackQueryHandler(start, pattern="^start$"))
+    application.add_handler(CallbackQueryHandler(home_command, pattern="^home$"))
     
     # Register profile setup handlers
     application.add_handler(CallbackQueryHandler(setup_profile, pattern="^setup_profile$"))
@@ -3169,6 +2790,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(toggle_interest, pattern="^toggle_interest_"))
     application.add_handler(CallbackQueryHandler(toggle_interest, pattern="^interest_"))
     application.add_handler(CallbackQueryHandler(complete_profile, pattern="^complete_profile$"))
+    
+    # Register callback handlers for main menu
     application.add_handler(CallbackQueryHandler(view_profile, pattern="^view_profile$"))
     application.add_handler(CallbackQueryHandler(edit_profile, pattern="^edit_profile$"))
     application.add_handler(CallbackQueryHandler(edit_gender, pattern="^edit_gender$"))
