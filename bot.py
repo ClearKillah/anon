@@ -178,31 +178,165 @@ class ChatManager:
         # Update database status
         await db.set_user_searching(user_id, False)
     
+    async def find_match(self, user_id: int) -> Optional[int]:
+        """
+        Find a matching chat partner for a user.
+        
+        Args:
+            user_id: Telegram user ID
+            
+        Returns:
+            Partner ID if found, None otherwise
+        """
+        try:
+            # Получаем пользователей, ищущих собеседника
+            waiting_users = await db.get_searching_users()
+            logger.info(f"User {user_id} searching for partner. Waiting users: {waiting_users}")
+            
+            # Исключаем пользователей, которые уже в чате
+            active_users = set()
+            for uid in waiting_users:
+                if uid in self.state.active_chats or await db.get_active_chat(uid):
+                    active_users.add(uid)
+                    logger.info(f"User {uid} is in active chat, excluding from search")
+            
+            waiting_users = [uid for uid in waiting_users if uid not in active_users and uid != user_id]
+            logger.info(f"Filtered waiting users for {user_id}: {waiting_users}")
+            
+            if not waiting_users:
+                logger.info(f"No waiting users found for {user_id}")
+                return None
+
+            # Проверяем профиль пользователя
+            has_profile = await db.has_completed_profile(user_id)
+            logger.info(f"User {user_id} has profile: {has_profile}")
+            
+            if has_profile:
+                # Получаем профиль и интересы пользователя
+                user_profile = await db.get_user_profile(user_id)
+                user_interests = await db.get_user_interests(user_id)
+                logger.info(f"User {user_id} profile: {user_profile}, interests: {user_interests}")
+                
+                # Ищем лучшего совпадения
+                best_match = None
+                max_common_interests = -1
+                
+                for waiting_user_id in waiting_users:
+                    # Проверяем профиль ожидающего пользователя
+                    waiting_user_has_profile = await db.has_completed_profile(waiting_user_id)
+                    logger.info(f"Waiting user {waiting_user_id} has profile: {waiting_user_has_profile}")
+                    
+                    if waiting_user_has_profile:
+                        waiting_user_profile = await db.get_user_profile(waiting_user_id)
+                        waiting_user_interests = await db.get_user_interests(waiting_user_id)
+                        logger.info(f"Waiting user {waiting_user_id} profile: {waiting_user_profile}, interests: {waiting_user_interests}")
+                        
+                        # Проверяем соответствие по полу
+                        gender_match = True
+                        
+                        if user_profile and waiting_user_profile:
+                            # Проверяем предпочтения пользователя
+                            if (user_profile.get('looking_for') and 
+                                user_profile['looking_for'].lower() != 'any' and
+                                waiting_user_profile.get('gender') and
+                                user_profile['looking_for'].lower() != waiting_user_profile['gender'].lower()):
+                                gender_match = False
+                                logger.info(f"Gender mismatch for user {user_id} and {waiting_user_id}")
+                            
+                            # Проверяем предпочтения ожидающего пользователя
+                            if (waiting_user_profile.get('looking_for') and 
+                                waiting_user_profile['looking_for'].lower() != 'any' and
+                                user_profile.get('gender') and
+                                waiting_user_profile['looking_for'].lower() != user_profile['gender'].lower()):
+                                gender_match = False
+                                logger.info(f"Gender mismatch for user {waiting_user_id} and {user_id}")
+                        
+                        if gender_match:
+                            # Считаем общие интересы
+                            common_interests = set(user_interests).intersection(set(waiting_user_interests))
+                            logger.info(f"Common interests between {user_id} and {waiting_user_id}: {common_interests}")
+                            
+                            if len(common_interests) > max_common_interests:
+                                max_common_interests = len(common_interests)
+                                best_match = waiting_user_id
+                                logger.info(f"New best match found: {waiting_user_id} with {max_common_interests} common interests")
+            
+            if best_match:
+                # Проверяем, что партнер все еще в поиске
+                searching_users = await db.get_searching_users()
+                if best_match not in searching_users:
+                    logger.info(f"Best match {best_match} is no longer searching")
+                    return None
+                
+                # Помечаем партнера как найденного
+                await db.set_user_searching(best_match, False)
+                self.state.users_searching.discard(best_match)
+                logger.info(f"Found best match {best_match} for user {user_id}")
+                return best_match
+        
+            # Если нет подходящих совпадений по профилю или у пользователя нет профиля,
+            # берем первого доступного пользователя из списка ожидающих
+            partner_id = waiting_users[0]
+            logger.info(f"No profile match found, using first available partner: {partner_id}")
+            
+            # Проверяем, что партнер все еще в поиске
+            searching_users = await db.get_searching_users()
+            if partner_id not in searching_users:
+                logger.info(f"Partner {partner_id} is no longer searching")
+                return None
+            
+            # Помечаем партнера как найденного
+            await db.set_user_searching(partner_id, False)
+            self.state.users_searching.discard(partner_id)
+            logger.info(f"Found partner {partner_id} for user {user_id}")
+            return partner_id
+            
+        except Exception as e:
+            logger.error(f"Error in find_match for user {user_id}: {e}")
+            return None
+    
     async def create_chat(self, user_id: int, partner_id: int, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
         """Create a new chat between two users."""
         try:
+            logger.info(f"Creating chat between {user_id} and {partner_id}")
+            
+            # Create chat in database first
+            chat_id = await db.create_chat(user_id, partner_id)
+            if not chat_id:
+                logger.error(f"Failed to create chat in database for {user_id} and {partner_id}")
+                return None
+                
+            logger.info(f"Created chat in database with ID: {chat_id}")
+            
+            # Only after successful chat creation, update searching status
+            await db.set_user_searching(user_id, False)
+            await db.set_user_searching(partner_id, False)
+            self.state.users_searching.discard(user_id)
+            self.state.users_searching.discard(partner_id)
+                
             # Add users to active chats
             self.state.active_chats[user_id] = partner_id
             self.state.active_chats[partner_id] = user_id
+            logger.info(f"Added users to active chats: {user_id} <-> {partner_id}")
             
             # Get user profiles
             user_profile = await db.get_user_profile(user_id)
             partner_profile = await db.get_user_profile(partner_id)
+            logger.info(f"Got profiles - User: {user_profile}, Partner: {partner_profile}")
             
             # Get user interests
             user_interests = await db.get_user_interests(user_id)
             partner_interests = await db.get_user_interests(partner_id)
+            logger.info(f"Got interests - User: {user_interests}, Partner: {partner_interests}")
             
             # Format profile information
             user_profile_text = await self._format_profile_info(user_profile, user_interests)
             partner_profile_text = await self._format_profile_info(partner_profile, partner_interests)
             
-            # Create chat in database
-            chat_id = await db.create_chat(user_id, partner_id)
-            
             # Get the search message from state
             user_message_id = self.state.main_message_ids.get(user_id)
             partner_message_id = self.state.main_message_ids.get(partner_id)
+            logger.info(f"Message IDs - User: {user_message_id}, Partner: {partner_message_id}")
             
             # Create keyboard with chat controls
             keyboard = CHAT_CONTROL_KEYBOARD
@@ -218,175 +352,53 @@ class ChatManager:
             # Обрабатываем сообщение для первого пользователя
             try:
                 if user_message_id:
-                    # Изменяем сообщение на обычное текстовое (без фото)
-                    await context.bot.edit_message_text(
+                    message = await context.bot.edit_message_media(
                         chat_id=user_id,
                         message_id=user_message_id,
-                        text=chat_started_text,
-                        parse_mode="MarkdownV2",
+                        media=InputMediaAnimation(
+                            media=MAIN_MENU_GIF,
+                            caption=chat_started_text,
+                            parse_mode="MarkdownV2"
+                        ),
                         reply_markup=reply_markup
                     )
-                    
                     # Закрепляем сообщение
-                    try:
-                        await context.bot.pin_chat_message(
-                            chat_id=user_id,
-                            message_id=user_message_id,
-                            disable_notification=True
-                        )
-                        logger.info(f"Successfully pinned message {user_message_id} for user {user_id}")
-                        
-                        # Запоминаем ID закрепленного сообщения
-                        await db.update_main_message_id(user_id, user_message_id)
-                        
-                        # Удаляем уведомление о закреплении
-                        await asyncio.sleep(1)
-                        await delete_pin_message(user_id, context)
-                    except Exception as pin_error:
-                        logger.error(f"Error pinning message for user {user_id}: {pin_error}")
-            except telegram.error.BadRequest as e:
-                # Если не удается изменить текст, пробуем изменить caption (для сообщений с медиа)
-                logger.info(f"Could not edit message text, trying to edit caption: {e}")
-                try:
-                    await context.bot.edit_message_caption(
+                    await context.bot.pin_chat_message(
                         chat_id=user_id,
-                        message_id=user_message_id,
-                        caption=chat_started_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
+                        message_id=message.message_id,
+                        disable_notification=True
                     )
-                    
-                    # Закрепляем сообщение
-                    try:
-                        await context.bot.pin_chat_message(
-                            chat_id=user_id,
-                            message_id=user_message_id,
-                            disable_notification=True
-                        )
-                        logger.info(f"Successfully pinned message {user_message_id} for user {user_id}")
-                        
-                        # Запоминаем ID закрепленного сообщения
-                        await db.update_main_message_id(user_id, user_message_id)
-                        
-                        # Удаляем уведомление о закреплении
-                        await asyncio.sleep(1)
-                        await delete_pin_message(user_id, context)
-                    except Exception as pin_error:
-                        logger.error(f"Error pinning message for user {user_id}: {pin_error}")
-                except Exception as e2:
-                    logger.error(f"Error editing caption for user {user_id}: {e2}")
-                    # Отправляем новое сообщение только в случае, если все методы редактирования не сработали
-                    message = await context.bot.send_message(
-                        chat_id=user_id,
-                        text=chat_started_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
-                    )
-                    self.state.main_message_ids[user_id] = message.message_id
+                    logger.info(f"Updated and pinned message for user {user_id}")
             except Exception as e:
-                logger.error(f"Error editing message for user {user_id}: {e}")
-                # Отправляем новое сообщение, если не удалось изменить существующее
-                message = await context.bot.send_message(
-                    chat_id=user_id,
-                    text=chat_started_text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
-                )
-                self.state.main_message_ids[user_id] = message.message_id
+                logger.error(f"Error updating message for user {user_id}: {e}")
             
-            # Второй текст для сообщения партнеру
-            chat_started_text = (
-                "🎯 *Собеседник найден\\!*\n\n"
-                f"{user_profile_text}\n\n"
-                "Используйте кнопки ниже для управления чатом\\."
-            )
-            
-            # Обрабатываем сообщение для второго пользователя (партнера)
+            # Обрабатываем сообщение для второго пользователя
             try:
                 if partner_message_id:
-                    # Изменяем сообщение на обычное текстовое (без фото)
-                    await context.bot.edit_message_text(
+                    message = await context.bot.edit_message_media(
                         chat_id=partner_id,
                         message_id=partner_message_id,
-                        text=chat_started_text,
-                        parse_mode="MarkdownV2",
+                        media=InputMediaAnimation(
+                            media=MAIN_MENU_GIF,
+                            caption=chat_started_text,
+                            parse_mode="MarkdownV2"
+                        ),
                         reply_markup=reply_markup
                     )
-                    
                     # Закрепляем сообщение
-                    try:
-                        await context.bot.pin_chat_message(
-                            chat_id=partner_id,
-                            message_id=partner_message_id,
-                            disable_notification=True
-                        )
-                        logger.info(f"Successfully pinned message {partner_message_id} for partner {partner_id}")
-                        
-                        # Запоминаем ID закрепленного сообщения
-                        await db.update_main_message_id(partner_id, partner_message_id)
-                        
-                        # Удаляем уведомление о закреплении
-                        await asyncio.sleep(1)
-                        await delete_pin_message(partner_id, context)
-                    except Exception as pin_error:
-                        logger.error(f"Error pinning message for partner {partner_id}: {pin_error}")
-            except telegram.error.BadRequest as e:
-                # Если не удается изменить текст, пробуем изменить caption (для сообщений с медиа)
-                logger.info(f"Could not edit message text, trying to edit caption: {e}")
-                try:
-                    await context.bot.edit_message_caption(
+                    await context.bot.pin_chat_message(
                         chat_id=partner_id,
-                        message_id=partner_message_id,
-                        caption=chat_started_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
+                        message_id=message.message_id,
+                        disable_notification=True
                     )
-                    
-                    # Закрепляем сообщение
-                    try:
-                        await context.bot.pin_chat_message(
-                            chat_id=partner_id,
-                            message_id=partner_message_id,
-                            disable_notification=True
-                        )
-                        logger.info(f"Successfully pinned message {partner_message_id} for partner {partner_id}")
-                        
-                        # Запоминаем ID закрепленного сообщения
-                        await db.update_main_message_id(partner_id, partner_message_id)
-                        
-                        # Удаляем уведомление о закреплении
-                        await asyncio.sleep(1)
-                        await delete_pin_message(partner_id, context)
-                    except Exception as pin_error:
-                        logger.error(f"Error pinning message for partner {partner_id}: {pin_error}")
-                except Exception as e2:
-                    logger.error(f"Error editing caption for partner {partner_id}: {e2}")
-                    # Отправляем новое сообщение только в случае, если все методы редактирования не сработали
-                    message = await context.bot.send_message(
-                        chat_id=partner_id,
-                        text=chat_started_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
-                    )
-                    self.state.main_message_ids[partner_id] = message.message_id
+                    logger.info(f"Updated and pinned message for partner {partner_id}")
             except Exception as e:
-                logger.error(f"Error editing message for partner {partner_id}: {e}")
-                # Отправляем новое сообщение, если не удалось изменить существующее
-                message = await context.bot.send_message(
-                    chat_id=partner_id,
-                    text=chat_started_text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
-                )
-                self.state.main_message_ids[partner_id] = message.message_id
+                logger.error(f"Error updating message for partner {partner_id}: {e}")
             
             return chat_id
             
         except Exception as e:
-            logger.error(f"Error creating chat: {e}")
-            # Clean up if chat creation fails
-            self.state.active_chats.pop(user_id, None)
-            self.state.active_chats.pop(partner_id, None)
+            logger.error(f"Error in create_chat: {e}")
             return None
     
     async def _format_profile_info(self, profile, interests):
@@ -492,84 +504,6 @@ class ChatManager:
         # Удаление сообщений происходит в функциях stop_chat_new и skip_chat_new
         
         return True
-    
-    async def find_match(self, user_id: int) -> Optional[int]:
-        """
-        Find a matching chat partner for a user.
-        
-        Args:
-            user_id: Telegram user ID
-            
-        Returns:
-            Partner ID if found, None otherwise
-        """
-        # Получаем пользователей, ищущих собеседника, из базы данных
-        waiting_users = await db.get_searching_users()
-        
-        # Исключаем пользователей, которые уже в чате
-        active_users = set()
-        for uid in waiting_users:
-            if uid in self.state.active_chats or await db.get_active_chat(uid):
-                active_users.add(uid)
-        
-        waiting_users = [uid for uid in waiting_users if uid not in active_users]
-        
-        # Убираем текущего пользователя из списка ожидающих
-        waiting_users = [uid for uid in waiting_users if uid != user_id]
-        
-        if not waiting_users:
-            return None
-            
-        # Check if user has a profile for better matching
-        has_profile = await db.has_completed_profile(user_id)
-        
-        if has_profile:
-            # Try to find a match based on profile preferences
-            user_profile = await db.get_user_profile(user_id)
-            user_interests = await db.get_user_interests(user_id)
-            
-            best_match = None
-            max_common_interests = -1
-            
-            for waiting_user_id in waiting_users:
-                # Get waiting user profile and interests
-                waiting_user_has_profile = await db.has_completed_profile(waiting_user_id)
-                
-                if waiting_user_has_profile:
-                    waiting_user_profile = await db.get_user_profile(waiting_user_id)
-                    waiting_user_interests = await db.get_user_interests(waiting_user_id)
-                    
-                    # Check gender preference match if specified
-                    gender_match = True
-                    
-                    if user_profile and waiting_user_profile:
-                        # Check if user is looking for specific gender and waiting user fits
-                        if (user_profile.get('looking_for') and 
-                            user_profile['looking_for'].lower() != 'any' and
-                            waiting_user_profile.get('gender') and
-                            user_profile['looking_for'].lower() != waiting_user_profile['gender'].lower()):
-                            gender_match = False
-                        
-                        # Check if waiting user is looking for specific gender and user fits
-                        if (waiting_user_profile.get('looking_for') and 
-                            waiting_user_profile['looking_for'].lower() != 'any' and
-                            user_profile.get('gender') and
-                            waiting_user_profile['looking_for'].lower() != user_profile['gender'].lower()):
-                            gender_match = False
-                    
-                    if gender_match:
-                        # Calculate common interests
-                        common_interests = set(user_interests).intersection(set(waiting_user_interests))
-                        if len(common_interests) > max_common_interests:
-                            max_common_interests = len(common_interests)
-                            best_match = waiting_user_id
-            
-            if best_match:
-                return best_match
-        
-        # Если нет подходящих совпадений по профилю или у пользователя нет профиля,
-        # просто берем первого доступного пользователя из списка ожидающих
-        return waiting_users[0]
 
 # Create a global instance of the BotState class
 state = BotState()
@@ -997,11 +931,21 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.answer()
     user_id = query.from_user.id
     
+    logger.info(f"User {user_id} started search")
+    
     # Check if user is already in an active chat
     if user_id in state.active_chats:
         partner_id = state.active_chats[user_id]
+        logger.info(f"User {user_id} is already in chat with {partner_id}")
         
-        # Update main message with chat controls
+        # Get partner's profile and interests
+        partner_profile = await db.get_user_profile(partner_id)
+        partner_interests = await db.get_user_interests(partner_id)
+        
+        # Format partner's profile information
+        partner_profile_text = await chat_manager._format_profile_info(partner_profile, partner_interests)
+        
+        # Create chat control keyboard
         keyboard = CHAT_CONTROL_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1009,7 +953,7 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.edit_message_media(
                 media=InputMediaAnimation(
                     media=MAIN_MENU_GIF,
-                    caption="Вы уже находитесь в активном чате\\. Используйте кнопки ниже для управления чатом\\.",
+                    caption=f"🎯 *Текущий собеседник*\n\n{partner_profile_text}\n\nИспользуйте кнопки ниже для управления чатом\\.",
                     parse_mode="MarkdownV2"
                 ),
                 reply_markup=reply_markup
@@ -1026,8 +970,11 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     searching_users = await db.get_searching_users()
     is_searching = user_id in searching_users or user_id in state.users_searching
     
+    logger.info(f"User {user_id} search status - DB: {user_id in searching_users}, State: {user_id in state.users_searching}")
+    
     # Check if user is already searching
     if is_searching:
+        logger.info(f"User {user_id} is already searching")
         # Update main message with search controls
         keyboard = SEARCH_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1049,27 +996,52 @@ async def search_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             
         return
     
+    # Add user to searching list first
+    state.users_searching.add(user_id)
+    await db.set_user_searching(user_id, True)
+    logger.info(f"Added user {user_id} to searching lists")
+    
     # Try to find a match for this user
     partner_id = await chat_manager.find_match(user_id)
+    logger.info(f"Search result for user {user_id}: partner_id={partner_id}")
     
     if partner_id:
-        # Remove partner from searching list both locally and in DB
-        state.users_searching.discard(partner_id)
-        await db.set_user_searching(partner_id, False)
-        
+        logger.info(f"Found partner {partner_id} for user {user_id}")
         # Save message IDs before creating chat
         state.main_message_ids[user_id] = query.message.message_id
         state.main_message_ids[partner_id] = state.main_message_ids.get(partner_id)
         
         # Create a new chat between these users
-        await chat_manager.create_chat(user_id, partner_id, context)
+        chat_id = await chat_manager.create_chat(user_id, partner_id, context)
+        if not chat_id:
+            logger.error(f"Failed to create chat between {user_id} and {partner_id}")
+            # If chat creation failed, put users back in search
+            state.users_searching.add(user_id)
+            state.users_searching.add(partner_id)
+            await db.set_user_searching(user_id, True)
+            await db.set_user_searching(partner_id, True)
+            
+            # Update message with search status
+            keyboard = SEARCH_KEYBOARD
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            try:
+                await query.edit_message_media(
+                    media=InputMediaAnimation(
+                        media=MAIN_MENU_GIF,
+                        caption="🔍 *Поиск собеседника*\n\n"
+                        "Ищем для вас собеседника\\.\n"
+                        "Это может занять некоторое время\\.\n\n"
+                        "Когда кто\\-то будет найден, я вам сообщу\\.",
+                        parse_mode="MarkdownV2"
+                    ),
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.error(f"Error updating message after failed chat creation: {e}")
     else:
-        # No partner found, start searching
-        # First, add user to searching list
-        state.users_searching.add(user_id)
-        await db.set_user_searching(user_id, True)
-        
-        # Update message with search status
+        logger.info(f"No partner found for user {user_id}, staying in search")
+        # No partner found, update message with search status
         keyboard = SEARCH_KEYBOARD
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -1133,54 +1105,25 @@ async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def delete_pin_message(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Delete the pin message using stored message ID."""
     try:
-        # Попытка удалить по сохраненному ID
-        pin_message_id = await db.get_pin_message_id(user_id)
-        if pin_message_id:
-            try:
-                await context.bot.delete_message(
-                    chat_id=user_id,
-                    message_id=pin_message_id
-                )
-                logger.info(f"Deleted pin notification message {pin_message_id} for user {user_id}")
-                await db.update_pin_message_id(user_id, None)
-            except Exception as e:
-                logger.error(f"Error deleting pin notification by ID: {e}")
+        # Получаем информацию о чате
+        chat = await context.bot.get_chat(user_id)
         
-        # Проактивный поиск сообщений о закреплении
-        try:
-            # Получить информацию о чате
-            chat = await context.bot.get_chat(user_id)
+        # Если в чате есть закрепленное сообщение
+        if chat.pinned_message:
+            pinned_message_id = chat.pinned_message.message_id
+            logger.info(f"Found pinned message {pinned_message_id} for user {user_id}")
             
-            # Если в чате есть закрепленное сообщение
-            if chat.pinned_message:
-                pinned_message_id = chat.pinned_message.message_id
-                
-                # Получаем возможные ID сообщений уведомлений (обычно появляются сразу после закрепленного)
-                possible_notification_ids = [
-                    pinned_message_id + 1,
-                    pinned_message_id + 2,
-                    pinned_message_id + 3,
-                    pinned_message_id + 4,
-                    pinned_message_id + 5
-                ]
-                
-                # Пытаемся удалить каждое возможное уведомление
-                for msg_id in possible_notification_ids:
-                    try:
-                        await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
-                        logger.info(f"Proactively deleted potential pin notification: {msg_id}")
-                    except Exception:
-                        # Игнорируем ошибки, так как мы просто пытаемся угадать ID
-                        pass
-                
-                # НЕ удаляем само закрепленное сообщение, оно должно остаться и быть изменено
-                
-            # Попытка удалить все сообщения с текстом о закреплении из последних 20 сообщений
-            # Это может быть сложно реализовать без специального API, поэтому пропускаем
-            
-        except Exception as e:
-            logger.error(f"Error in proactive pin notification cleanup: {e}")
-            
+            # Пробуем удалить несколько сообщений после закрепленного
+            for i in range(1, 5):
+                try:
+                    await context.bot.delete_message(
+                        chat_id=user_id,
+                        message_id=pinned_message_id + i
+                    )
+                    logger.info(f"Successfully deleted message {pinned_message_id + i} for user {user_id}")
+                except Exception:
+                    continue
+                    
     except Exception as e:
         logger.error(f"Error handling pin message deletion for user {user_id}: {e}")
 
@@ -1297,252 +1240,179 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         state.main_message_ids[user_id] = message.message_id
 
 async def skip_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle skip chat button press."""
+    """
+    Skip the current chat and immediately start searching for a new one.
+    
+    This function is triggered when a user clicks the "Skip Chat" button.
+    It ends the current chat and automatically starts searching for a new chat partner.
+    """
     query = update.callback_query
-    if not query:
+    if not query or not query.from_user:
         return
-        
+
     await query.answer()
     user_id = query.from_user.id
+    logger.info(f"[C1] User {user_id} pressed SKIP chat button")
     
-    # Получаем ID партнера перед завершением чата
-    partner_id = state.active_chats.get(user_id)
+    # Проверяем, есть ли активный чат
+    if user_id not in state.active_chats:
+        logger.warning(f"[C1] User {user_id} tried to skip chat but has no active chat")
+        await query.message.reply_text("❌ У вас нет активного чата")
+        return
     
-    # Получаем информацию о закрепленном сообщении перед удалением чата
-    pinned_message_id = None
-    try:
-        chat = await context.bot.get_chat(user_id)
-        if chat.pinned_message:
-            pinned_message_id = chat.pinned_message.message_id
-    except Exception as e:
-        logger.error(f"Error getting pinned message: {e}")
+    # Получаем ID партнера
+    partner_id = state.active_chats[user_id]
+    logger.info(f"[C2] Partner {partner_id} will be notified about chat skip")
     
-    # Удаляем только уведомления о закреплении, но не само закрепленное сообщение
-    try:
-        # Снимаем закрепление, чтобы убрать значок закрепления
-        await context.bot.unpin_all_chat_messages(chat_id=user_id)
-        # Удаляем уведомления о закреплении
-        await delete_pin_message(user_id, context)
-        
-        # Для партнера также удаляем уведомления
-        if partner_id:
-            await context.bot.unpin_all_chat_messages(chat_id=partner_id)
-            await delete_pin_message(partner_id, context)
-    except Exception as e:
-        logger.error(f"Error unpinning messages: {e}")
-    
-    # Очищаем все сообщения у обоих пользователей, кроме закрепленного сообщения
-    if pinned_message_id and user_id in state.user_messages:
-        # Временно удаляем закрепленное сообщение из списка для удаления
-        if pinned_message_id in state.user_messages[user_id]:
-            state.user_messages[user_id].remove(pinned_message_id)
-    
-    # Теперь удаляем все сообщения из Telegram
+    # Отправляем сообщение партнеру
+    if partner_id:
+        try:
+            partner_message = await context.bot.send_animation(
+                chat_id=partner_id,
+                animation=MAIN_MENU_GIF,
+                caption="❌ *Ваш собеседник покинул чат*\n\n"
+                     "Выберите действие:",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Новый собеседник", callback_data="search_chat")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="home")]
+                ])
+            )
+            state.main_message_ids[partner_id] = partner_message.message_id
+        except Exception as e:
+            logger.error(f"Error sending message to partner: {e}")
+
+    # Очищаем историю чата
     await clear_all_messages(user_id, context)
     if partner_id:
         await clear_all_messages(partner_id, context)
-    
-    # End current chat
-    success = await chat_manager.end_chat(user_id, context)
-    if not success:
-        return
-    
-    # Сохраняем закрепленное сообщение обратно в список сообщений пользователя
-    if pinned_message_id:
-        if user_id not in state.user_messages:
-            state.user_messages[user_id] = []
-        state.user_messages[user_id].append(pinned_message_id)
-        state.main_message_ids[user_id] = pinned_message_id
+
+    # Завершаем текущий чат
+    if partner_id:
+        # Удаляем из активных чатов
+        if user_id in state.active_chats:
+            del state.active_chats[user_id]
+        if partner_id in state.active_chats:
+            del state.active_chats[partner_id]
         
-    # Start searching for new chat - изменяем закрепленное сообщение на сообщение поиска
-    keyboard = SEARCH_KEYBOARD
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    try:
-        # Если у нас есть закрепленное сообщение, изменяем его вместо создания нового
-        if pinned_message_id:
-            await context.bot.edit_message_text(
-                chat_id=user_id,
-                message_id=pinned_message_id,
-                text="🔍 *Поиск нового собеседника*\n\n"
-                    "Ищем для вас нового собеседника\\.\n"
-                    "Обычно это занимает несколько минут\\.\n\n"
-                    "Когда кто\\-то будет найден, я вам сообщу\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-        else:
-            # Если закрепленного сообщения нет, отправляем новое
-            message = await context.bot.send_animation(
-                chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption="🔍 *Поиск нового собеседника*\n\n"
-                     "Ищем для вас нового собеседника\\.\n"
-                     "Обычно это занимает несколько минут\\.\n\n"
-                     "Когда кто\\-то будет найден, я вам сообщу\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-            state.main_message_ids[user_id] = message.message_id
-    except Exception as e:
-        logger.error(f"Error updating message: {e}")
-        # В случае ошибки отправляем новое сообщение
-        try:
-            message = await context.bot.send_animation(
-                chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption="🔍 *Поиск нового собеседника*\n\n"
-                     "Ищем для вас нового собеседника\\.\n"
-                     "Обычно это занимает несколько минут\\.\n\n"
-                     "Когда кто\\-то будет найден, я вам сообщу\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-            state.main_message_ids[user_id] = message.message_id
-        except Exception as e2:
-            logger.error(f"Error sending fallback message: {e2}")
-            return
-    
-    # Start the search process - добавляем пользователя в поиск
+        # Обновляем статус чата в базе данных
+        chat_result = await db.get_active_chat(user_id)
+        if chat_result:
+            chat_id, _ = chat_result
+            await db.end_chat(chat_id)
+            
+        # Очищаем сообщения из state
+        if user_id in state.user_messages:
+            state.user_messages[user_id] = []
+        if partner_id in state.user_messages:
+            state.user_messages[partner_id] = []
+
+    # Добавляем пользователя в список поиска
     state.users_searching.add(user_id)
     await db.set_user_searching(user_id, True)
+    
+    try:
+        # Открепляем сообщение и удаляем уведомление о закреплении
+        try:
+            await context.bot.unpin_all_chat_messages(chat_id=user_id)
+            await delete_pin_message(user_id, context)
+        except Exception as e:
+            logger.error(f"Error unpinning message: {e}")
+            
+        # Редактируем существующее сообщение
+        await query.edit_message_media(
+            media=InputMediaAnimation(
+                media=MAIN_MENU_GIF,
+                caption="🔍 *Поиск собеседника*\n\n"
+                     "Ищем для вас собеседника\\.\n"
+                     "Это может занять некоторое время\\.\n\n"
+                     "Когда кто\\-то будет найден, я вам сообщу\\.",
+                parse_mode="MarkdownV2"
+            ),
+            reply_markup=InlineKeyboardMarkup(SEARCH_KEYBOARD)
+        )
+    except Exception as e:
+        logger.error(f"Error editing message: {e}")
+        # В случае ошибки редактирования отправляем новое сообщение
+        await update_main_message(
+            user_id,
+            context,
+            "🔍 *Поиск собеседника*\n\n"
+            "Ищем для вас собеседника\\.\n"
+            "Это может занять некоторое время\\.\n\n"
+            "Когда кто\\-то будет найден, я вам сообщу\\.",
+            InlineKeyboardMarkup(SEARCH_KEYBOARD)
+        )
+    logger.info(f"[C1] User {user_id} started searching for new chat")
 
 async def stop_chat_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle stop chat button press."""
+    """Handle the stop chat button press"""
     query = update.callback_query
-    if not query:
-        return
-        
     await query.answer()
-    user_id = query.from_user.id
     
-    # Получаем ID партнера перед завершением чата
-    partner_id = state.active_chats.get(user_id)
+    user_id = query.from_user.id
+    logger.info(f"[C1] User {user_id} pressed STOP chat button")
+    
+    # Проверяем, есть ли активный чат
+    if user_id not in state.active_chats:
+        logger.warning(f"[C1] User {user_id} tried to stop chat but has no active chat")
+        await query.message.reply_text("❌ У вас нет активного чата")
+        return
+    
+    # Получаем ID партнера
+    partner_id = state.active_chats[user_id]
+    logger.info(f"[C2] Partner {partner_id} will be notified about chat end")
     
     # Уведомляем партнера о том, что пользователь покинул чат
     if partner_id:
-        partner_pinned_message_id = None
         try:
-            partner_chat = await context.bot.get_chat(partner_id)
-            if partner_chat.pinned_message:
-                partner_pinned_message_id = partner_chat.pinned_message.message_id
-                
-                # Создаем клавиатуру для партнера с кнопками для следующих действий
-                partner_keyboard = [
-                    [
-                        InlineKeyboardButton("🔍 Новый собеседник", callback_data="search_chat"),
-                        InlineKeyboardButton("🏠 Главное меню", callback_data="home")
-                    ]
-                ]
-                partner_reply_markup = InlineKeyboardMarkup(partner_keyboard)
-                
-                # Изменяем закрепленное сообщение партнера
-                await context.bot.edit_message_text(
-                    chat_id=partner_id,
-                    message_id=partner_pinned_message_id,
-                    text="❌ *Ваш собеседник покинул чат*\n\nВыберите действие:",
-                    parse_mode="MarkdownV2",
-                    reply_markup=partner_reply_markup
-                )
+            partner_message = await context.bot.send_animation(
+                chat_id=partner_id,
+                animation=MAIN_MENU_GIF,
+                caption="❌ *Ваш собеседник покинул чат*\n\n"
+                     "Выберите действие:",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Новый собеседник", callback_data="search_chat")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="home")]
+                ])
+            )
+            state.main_message_ids[partner_id] = partner_message.message_id
         except Exception as e:
-            logger.error(f"Error notifying partner about chat end: {e}")
-    
-    # Получаем информацию о закрепленном сообщении перед удалением чата
-    pinned_message_id = None
-    try:
-        chat = await context.bot.get_chat(user_id)
-        if chat.pinned_message:
-            pinned_message_id = chat.pinned_message.message_id
-    except Exception as e:
-        logger.error(f"Error getting pinned message: {e}")
-    
-    # Удаляем только уведомления о закреплении, но не само закрепленное сообщение
-    try:
-        # Снимаем закрепление, чтобы убрать значок закрепления
-        await context.bot.unpin_all_chat_messages(chat_id=user_id)
-        # Удаляем уведомления о закреплении
-        await delete_pin_message(user_id, context)
-        
-        # Для партнера также удаляем уведомления
-        if partner_id:
-            await context.bot.unpin_all_chat_messages(chat_id=partner_id)
-            await delete_pin_message(partner_id, context)
-    except Exception as e:
-        logger.error(f"Error unpinning messages: {e}")
-    
-    # Очищаем все сообщения у обоих пользователей, кроме закрепленного сообщения
-    if pinned_message_id and user_id in state.user_messages:
-        # Временно удаляем закрепленное сообщение из списка для удаления
-        if pinned_message_id in state.user_messages[user_id]:
-            state.user_messages[user_id].remove(pinned_message_id)
-    
-    # Если есть закрепленное сообщение у партнера, исключаем его из удаления
-    if partner_id and partner_pinned_message_id and partner_id in state.user_messages:
-        if partner_pinned_message_id in state.user_messages[partner_id]:
-            state.user_messages[partner_id].remove(partner_pinned_message_id)
-    
-    # Теперь удаляем все сообщения из Telegram
+            logger.error(f"Error sending message to partner: {e}")
+
+    # Очищаем историю чата
     await clear_all_messages(user_id, context)
     if partner_id:
         await clear_all_messages(partner_id, context)
+        
+    # Очищаем сообщения из state
+    if user_id in state.user_messages:
+        state.user_messages[user_id] = []
+    if partner_id and partner_id in state.user_messages:
+        state.user_messages[partner_id] = []
     
-    # End current chat
+    # Завершаем чат
     success = await chat_manager.end_chat(user_id, context)
-    if not success:
-        return
     
-    # Сохраняем закрепленное сообщение обратно в список сообщений пользователя
-    if pinned_message_id:
-        if user_id not in state.user_messages:
-            state.user_messages[user_id] = []
-        state.user_messages[user_id].append(pinned_message_id)
-        state.main_message_ids[user_id] = pinned_message_id
-        
-    # Сохраняем закрепленное сообщение партнера, если оно существует
-    if partner_id and partner_pinned_message_id:
-        if partner_id not in state.user_messages:
-            state.user_messages[partner_id] = []
-        state.user_messages[partner_id].append(partner_pinned_message_id)
-        state.main_message_ids[partner_id] = partner_pinned_message_id
-        
-    # Return to main menu (home command)
-    keyboard = MAIN_MENU_KEYBOARD
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    try:
-        # Если у нас есть закрепленное сообщение, изменяем его на главное меню
-        if pinned_message_id:
-            await context.bot.edit_message_text(
-                chat_id=user_id,
-                message_id=pinned_message_id,
-                text=MAIN_MENU_TEXT,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-        else:
-            # Если закрепленного сообщения нет, отправляем новое
-            message = await context.bot.send_animation(
-                chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption=MAIN_MENU_TEXT,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-            state.main_message_ids[user_id] = message.message_id
-    except Exception as e:
-        logger.error(f"Error updating message: {e}")
-        # В случае ошибки отправляем новое сообщение
+    if success:
+        logger.info(f"[CHAT] Successfully ended chat between C1={user_id} and C2={partner_id}")
+        # Открепляем сообщение и удаляем уведомление о закреплении
         try:
-            message = await context.bot.send_animation(
-                chat_id=user_id,
-                animation=MAIN_MENU_GIF,
-                caption=MAIN_MENU_TEXT,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-            state.main_message_ids[user_id] = message.message_id
+            await context.bot.unpin_all_chat_messages(chat_id=user_id)
+            await delete_pin_message(user_id, context)
+            if partner_id:
+                await context.bot.unpin_all_chat_messages(chat_id=partner_id)
+                await delete_pin_message(partner_id, context)
         except Exception as e:
-            logger.error(f"Error sending fallback message: {e}")
+            logger.error(f"Error unpinning messages and deleting pin notifications: {e}")
+            
+        # Возвращаемся в главное меню
+        await home_command(update, context)
+        logger.info(f"[C1] User {user_id} returned to main menu")
+    else:
+        logger.error(f"[CHAT] Failed to end chat for users C1={user_id}, C2={partner_id}")
+        await query.message.reply_text("❌ Произошла ошибка при завершении чата")
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear chat history for both users."""
@@ -1628,8 +1498,24 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle service messages like pin notifications."""
-    # Сюда добавить обработку служебных сообщений Telegram
-    pass
+    if not update.message or not update.effective_user:
+        return
+        
+    user_id = update.effective_user.id
+    message = update.message
+    
+    # Проверяем, является ли это сообщением о закреплении
+    if message.pinned_message or (message.text and ("pinned" in message.text.lower() or "закрепил" in message.text.lower())):
+        logger.info(f"Found pin notification message {message.message_id} for user {user_id}")
+        try:
+            # Сразу пытаемся удалить это сообщение
+            await context.bot.delete_message(
+                chat_id=user_id,
+                message_id=message.message_id
+            )
+            logger.info(f"Successfully deleted pin notification {message.message_id}")
+        except Exception as e:
+            logger.error(f"Error deleting pin notification: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user messages."""
@@ -2808,14 +2694,11 @@ def main() -> None:
     
     # Register handler for service messages (should be before general message handler)
     application.add_handler(MessageHandler(
-        filters.StatusUpdate.PINNED_MESSAGE & filters.ChatType.PRIVATE,
-        handle_service_message
-    ))
-    
-    # Register handler for pinned message text search
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.Regex(r'(закреплено|pinned|message|сообщение)'),
-        handle_service_message
+        (filters.StatusUpdate.PINNED_MESSAGE | 
+         (filters.TEXT & filters.Regex(r'(?i).*(закрепил|pinned).*'))) & 
+        filters.ChatType.PRIVATE,
+        handle_service_message,
+        block=False  # Важно: не блокируем другие обработчики
     ))
     
     # Register media message handlers
