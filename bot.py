@@ -1974,11 +1974,8 @@ async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = "*Редактирование профиля*\n\n" \
            "Выберите, что вы хотите изменить в вашем профиле:"
     
-    # Удаляем предыдущее сообщение с профилем
     try:
-        await query.message.delete()
-        
-        # Отправляем новое текстовое сообщение
+        # Всегда отправляем новое сообщение
         message = await context.bot.send_message(
             chat_id=user_id,
             text=text,
@@ -1988,17 +1985,16 @@ async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         # Сохраняем ID нового сообщения
         state.main_message_ids[user_id] = message.message_id
+        
+        # Удаляем предыдущее сообщение
+        if query.message:
+            try:
+                await query.message.delete()
+            except Exception as e:
+                logger.error(f"Error deleting old message: {e}")
+                
     except Exception as e:
         logger.error(f"Error sending edit profile message: {e}")
-        # В случае ошибки пробуем редактировать существующее сообщение
-        try:
-            await query.edit_message_text(
-                text=text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-        except Exception as e2:
-            logger.error(f"Error editing message for edit profile menu: {e2}")
 
 async def edit_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Edit gender in profile."""
